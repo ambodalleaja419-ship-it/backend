@@ -2,4 +2,4 @@ flask
 flask-cors
 requests
 uvicorn
-gunicorn
+requests
