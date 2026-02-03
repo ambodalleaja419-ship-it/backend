@@ -2,6 +2,5 @@ flask
 flask-cors
 requests
 telethon
-uvicorn[standard]
 asgiref
 gunicorn
