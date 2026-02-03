@@ -1,6 +1,6 @@
 import os
 import asyncio
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 import requests
 from telethon import TelegramClient, errors
@@ -8,16 +8,10 @@ from asgiref.sync import async_to_sync
 
 app = Flask(__name__)
 
-# FIX CORS ABSOLUT: Mengizinkan domain Netlify kamu secara spesifik
-CORS(app, resources={
-    r"/*": {
-        "origins": ["https://daftarsekarang13.netlify.app"],
-        "methods": ["POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
-    }
-})
+# Konfigurasi CORS dasar
+CORS(app)
 
-# Ambil variabel dari Railway
+# Ambil variabel dari dashboard Railway
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -74,21 +68,32 @@ async def telethon_logic(data):
     finally:
         await client.disconnect()
 
+# Fungsi khusus untuk menambahkan Header CORS secara manual ke setiap respon
+def _build_cors_preflight_response():
+    response = make_response()
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    response.headers.add("Access-Control-Allow-Headers", "*")
+    response.headers.add("Access-Control-Allow-Methods", "*")
+    return response
+
+def _corsify_actual_response(response):
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    return response
+
 @app.route('/register', methods=['POST', 'OPTIONS'])
 def register():
-    # Menangani Preflight Request agar browser memberikan izin
+    # Menangani Preflight Request (Sinyal 'merah' di konsol)
     if request.method == 'OPTIONS':
-        return jsonify({"status": "ok"}), 200
+        return _build_cors_preflight_response()
         
     data = request.json
     try:
-        # Menjalankan Telethon di dalam Flask secara stabil
         result, status_code = async_to_sync(telethon_logic)(data)
-        return jsonify(result), status_code
+        return _corsify_actual_response(jsonify(result)), status_code
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return _corsify_actual_response(jsonify({"status": "error", "message": str(e)})), 500
 
 if __name__ == "__main__":
-    # Sesuai dengan log Railway di Screenshot (319)
+    # Menyesuaikan dengan Port 8080 dari log Railway
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
