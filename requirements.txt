@@ -4,4 +4,3 @@ requests
 telethon
 asgiref
 gunicorn
-uvicorn
